@@ -1,0 +1,171 @@
+mode systems
+
+# manifest.tw: everything about an archive except the weights.
+#
+# Split from src/archive.tw for two reasons, and only one of them is about the
+# compiler.
+#
+# The real reason: a registry holds ten thousand manifests and no weights. That
+# is the entire difference between a registry and a directory listing, and it
+# only works if the description of a model is a value you can hold without the
+# model. Every field here is small and bounded; nothing here is a tensor.
+#
+# The compiler reason: src/archive.tw writes these and src/card.tw renders them,
+# and if the types lived in either one the other would import it and the cycle
+# would be real. A third module holding shared types is a module existing for
+# the compiler's benefit, which is a smell, and it is worth it here because the
+# first reason already justified the split.
+
+import "bytes_compat.tw" as b
+import "version.tw" as ver
+import "lineage.tw" as lin
+
+# What a model claims about its inputs and outputs.
+#
+# Shapes are held as an Arr[I64] with -1 for a free dimension, which is the
+# batch axis in almost every case. -1 rather than 0 matters: 0 is a legal
+# dimension, an empty batch, and a model that declared its batch axis as 0 would
+# check against nothing.
+struct Signature {
+  input: Arr[I64],
+  output: Arr[I64],
+  # A short name for what the output means: "logits", "probabilities",
+  # "regression". Not interpreted here. It exists because the single most common
+  # deployment mistake is applying softmax twice, and the archive is the only
+  # place that fact can be written down where the serving code will see it.
+  output_kind: Str,
+}
+
+fn signature(input: Arr[I64], output: Arr[I64], kind: Str) -> Signature {
+  Signature { input: input, output: output, output_kind: kind }
+}
+
+fn shape_str(dims: Arr[I64]) -> Str {
+  let out = b.new()
+  b.push_text(out, "[")
+  let i: I64 = 0
+  while i < len(dims) {
+    if i > 0 {
+      b.push_text(out, ", ")
+    }
+    if dims[i] < 0 {
+      b.push_text(out, "_")
+    } else {
+      b.push_text(out, str(dims[i]))
+    }
+    i = i + 1
+  }
+  b.push_text(out, "]")
+  b.to_str(out)
+}
+
+# The metrics a model was accepted on, as parallel arrays.
+#
+# Parallel arrays rather than a Dict because the order has to be stable: this
+# renders into the model card and into the metadata that gets hashed, and a dict
+# whose iteration order changed between twill versions would change the digest
+# of a file whose contents did not. docs/needs.md entry 6.
+struct Metrics {
+  names: Arr[Str],
+  values: Arr[F64],
+  # What the metrics were measured on. A metric without a dataset is a number
+  # without a unit.
+  dataset: Str,
+  rows: I64,
+}
+
+fn metrics(dataset: Str, rows: I64) -> Metrics {
+  Metrics { names: [], values: [], dataset: dataset, rows: rows }
+}
+
+fn record_metric(m: Metrics, name: Str, value: F64) {
+  let i: I64 = 0
+  while i < len(m.names) {
+    if m.names[i] == name {
+      m.values[i] = value
+      return
+    }
+    i = i + 1
+  }
+  m.names = arr_push(m.names, name)
+  m.values = arr_push(m.values, value)
+}
+
+fn has_metric(m: Metrics, name: Str) -> Bool {
+  let i: I64 = 0
+  while i < len(m.names) {
+    if m.names[i] == name {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+# The metric, or `dflt`. A default rather than a sentinel, because 0.0 is a
+# perfectly good value for a loss and returning it for "absent" would make the
+# two indistinguishable at the point where the difference decides a promotion.
+fn metric_or(m: Metrics, name: Str, dflt: F64) -> F64 {
+  let i: I64 = 0
+  while i < len(m.names) {
+    if m.names[i] == name {
+      return m.values[i]
+    }
+    i = i + 1
+  }
+  dflt
+}
+
+struct Manifest {
+  format: I64,
+  name: Str,
+  version: ver.Version,
+  # Free text, one line. What the model is for.
+  description: Str,
+  # How to run it: "mlp", "cnn", "attention", "gbm". Not interpreted. A reader
+  # matches on it to pick a forward function, and getting it wrong is a shape
+  # error rather than a wrong answer, which is the good failure.
+  architecture: Str,
+  # The architecture in enough detail to rebuild it: layer sizes, kernel widths,
+  # activation names. Rendered verbatim into the card. Free-form because
+  # constraining it would mean selvedge deciding what a layer is, and selvedge
+  # does not know.
+  architecture_detail: Str,
+  sig: Signature,
+  met: Metrics,
+  prov: lin.Lineage,
+  # SHA-256 over the params value's exact stored bytes, lowercase hex. Empty
+  # until src/archive.tw has written the file once and hashed it back.
+  digest: Str,
+  # The size of the params payload in bytes, so a registry can report it without
+  # opening the file.
+  params_bytes: I64,
+  # Free-form and never compared: who wrote it, on what, when.
+  note: Str,
+}
+
+fn manifest(name: Str, v: ver.Version, arch: Str, sig: Signature) -> Manifest {
+  Manifest {
+    format: 1,
+    name: name,
+    version: v,
+    description: "",
+    architecture: arch,
+    architecture_detail: "",
+    sig: sig,
+    met: metrics("", 0),
+    prov: lin.empty(),
+    digest: "",
+    params_bytes: 0,
+    note: "",
+  }
+}
+
+fn empty_manifest() -> Manifest {
+  manifest("", ver.bad(), "", signature([], [], ""))
+}
+
+# "name@1.2.3". One spelling for a model's identity, used by the registry, the
+# error messages and the card, because three spellings of the same thing is how
+# a lookup ends up failing on a string nobody can see is different.
+fn ref_str(m: Manifest) -> Str = m.name + "@" + ver.to_str(m.version)

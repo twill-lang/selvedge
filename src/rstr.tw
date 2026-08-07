@@ -1,0 +1,495 @@
+mode systems
+
+# rstr.tw: reading and writing twill's on-disk value encoding, in twill.
+#
+# ---- the contract ----------------------------------------------------------
+#
+# The first four bytes of every twill save file are 'R', 'S', 'T', 'R'. THOSE
+# FOUR BYTES ARE A COMPATIBILITY CONTRACT AND THIS FILE DOES NOT CHANGE THEM.
+# They are not branding, they do not track the language's name, and no amount of
+# tidiness justifies touching them: every file a user has already written with
+# `save` has to keep loading, and `examples/model.bin` in the twill repository
+# is one of those files. The reference implementation says the same thing in
+# `internal/interp/serialize.go`, and a second implementation that quietly
+# disagreed would be worse than no second implementation. If the encoding ever
+# changes for a reason that is actually about the encoding, the resolution
+# recorded upstream is a new magic at version 2 with one dual-path reader, and
+# selvedge follows whatever upstream does rather than leading it.
+#
+# ---- the encoding ----------------------------------------------------------
+#
+# Transcribed from `internal/interp/serialize.go`. Little-endian throughout.
+#
+#   file    := "RSTR" version:u8 value
+#   value   := 'T' rank:i32 dim:i32 * rank  n:i64  f64 * n      a tensor
+#            | 'L' count:i32 value * count                      a list
+#            | 'R' count:i32 (len:i32 key:bytes value) * count   a record
+#            | 'B' 0|1                                          a bool
+#            | 'S' len:i32 bytes                                 a string
+#            | 'U'                                               unit
+#            | 'G' len:i32 bytes                                 a boosted-tree model
+#
+# Four details that are easy to get wrong and are load-bearing:
+#
+#   1. A tensor's rank and dimensions are i32 and its element count is i64.
+#      The widths are not uniform. A reader that treats the count as i32 reads
+#      four bytes of the first float as a length.
+#   2. A record's keys are written in insertion order and the order is part of
+#      the bytes. Sorting them on write produces a file that loads to an equal
+#      value and hashes differently, which defeats a content hash.
+#   3. A scalar is written as a rank-0 tensor: 'T', rank 0, no dims, n = 1, one
+#      float. There is no separate number tag.
+#   4. 'G' is a boosted-tree model, an opaque blob produced by the reference
+#      implementation's own marshaller. This file carries it, measures it and
+#      hashes it. It does not interpret it, and it does not pretend to: the
+#      blob's internal layout is not part of the file format's contract the way
+#      the outer framing is.
+#
+# ---- what this file is for -------------------------------------------------
+#
+# selvedge does not encode a parameter tree itself. It cannot: the subset gives
+# no way to ask a `Tree` whether it is a record, a list or a tensor, so a
+# structural walk is unwritable here (docs/needs.md entry 4). Parameters are
+# written by the `save` builtin, which produces exactly the bytes above.
+#
+# What this file does is read them back. That is enough to do the three things
+# an archive format needs and `save`/`load` do not: check the framing before
+# trusting a file, find the archive's own header fields without materialising
+# a hundred megabytes of weights, and hash the parameter payload over its exact
+# bytes rather than over a re-rendering of it. The writer half exists for the
+# small metadata values selvedge builds itself, where it does know the
+# structure because it constructed it.
+
+import "bytes_compat.tw" as b
+
+let MAGIC_R: I64 = 82
+let MAGIC_S: I64 = 83
+let MAGIC_T: I64 = 84
+
+# The version byte the reference implementation writes. selvedge refuses
+# anything else rather than guessing, which is the same rule the Go reader has.
+let SAVE_VERSION: I64 = 1
+
+let TAG_TENSOR: I64 = 84
+let TAG_LIST: I64 = 76
+let TAG_RECORD: I64 = 82
+let TAG_BOOL: I64 = 66
+let TAG_STR: I64 = 83
+let TAG_UNIT: I64 = 85
+let TAG_MODEL: I64 = 71
+
+# The header is four magic bytes plus one version byte. Named because three
+# functions offset by it and a literal 5 in three places is a bug waiting for
+# the format to grow a field.
+let HEADER_LEN: I64 = 5
+
+# A rank above this is corruption, not a tensor. The reference reader uses 16
+# and a second implementation with a laxer bound is a second implementation
+# that accepts files the first one rejects.
+let MAX_RANK: I64 = 16
+
+# ---- reading ---------------------------------------------------------------
+
+# A cursor over the file's bytes.
+#
+# `err` is set once and never cleared, and every read is a no-op after it is
+# set. The alternative, checking a return value at each of the forty read sites
+# below, is what the subset forces on code that wants `Res` (docs/needs.md
+# entry 3); a sticky error field is the version of that which stays readable.
+# The rule for callers is one check at the end, not forty in the middle.
+struct Reader {
+  src: Str,
+  pos: I64,
+  err: Str,
+}
+
+fn reader(src: Str) -> Reader {
+  Reader { src: src, pos: 0, err: "" }
+}
+
+fn fail(r: Reader, msg: Str) {
+  if len(r.err) == 0 {
+    r.err = msg + " at byte " + str(r.pos)
+  }
+}
+
+fn remaining(r: Reader) -> I64 = len(r.src) - r.pos
+
+fn need(r: Reader, n: I64) -> Bool {
+  if len(r.err) > 0 {
+    return false
+  }
+  if remaining(r) < n {
+    fail(r, "truncated file: wanted " + str(n) + " more bytes and " + str(remaining(r)) + " remain")
+    return false
+  }
+  true
+}
+
+fn read_byte(r: Reader) -> I64 {
+  if not need(r, 1) {
+    return 0
+  }
+  let v = r.src[r.pos]
+  r.pos = r.pos + 1
+  v
+}
+
+# A little-endian i32. Sign-extended, because the reference writes a Go int32
+# and its readers check for negatives to catch corruption; a reader that
+# returned 4294967295 for -1 would report the wrong diagnosis.
+fn read_i32(r: Reader) -> I64 {
+  if not need(r, 4) {
+    return 0
+  }
+  let v: I64 = 0
+  let i: I64 = 0
+  while i < 4 {
+    v = or(v, shl(r.src[r.pos + i], i * 8))
+    i = i + 1
+  }
+  r.pos = r.pos + 4
+  if v >= 2147483648 {
+    return v - 4294967296
+  }
+  v
+}
+
+fn read_i64(r: Reader) -> I64 {
+  if not need(r, 8) {
+    return 0
+  }
+  let v: I64 = 0
+  let i: I64 = 0
+  while i < 8 {
+    v = or(v, shl(r.src[r.pos + i], i * 8))
+    i = i + 1
+  }
+  r.pos = r.pos + 8
+  v
+}
+
+# An IEEE 754 double, read from its bit pattern rather than from a decimal
+# rendering. Going through text would round-trip most values and lose the
+# distinction between a signalling and a quiet NaN, and the whole reason the
+# format stores bit patterns is that a saved model reloads bit for bit.
+fn read_f64(r: Reader) -> F64 {
+  f64_from_bits(read_i64(r))
+}
+
+fn read_bytes(r: Reader, n: I64) -> Str {
+  if n < 0 {
+    fail(r, "corrupt file: negative length " + str(n))
+    return ""
+  }
+  if not need(r, n) {
+    return ""
+  }
+  let s = b.slice(r.src, r.pos, r.pos + n)
+  r.pos = r.pos + n
+  s
+}
+
+# A length written as i32, refusing the negative values the reference reader
+# refuses. Corruption that flips the top bit of a length otherwise turns into
+# an allocation request for two gigabytes.
+fn read_count(r: Reader) -> I64 {
+  let n = read_i32(r)
+  if n < 0 {
+    fail(r, "corrupt file: negative length " + str(n))
+    return 0
+  }
+  n
+}
+
+fn read_str(r: Reader) -> Str {
+  read_bytes(r, read_count(r))
+}
+
+# Consume the magic and the version byte. Returns an empty string on success and
+# a message otherwise, which is the ecosystem's convention for a fallible
+# function in the absence of `Res`.
+#
+# The two failures are told apart deliberately. "This is not a twill save file"
+# sends someone to look at what they passed; "this file is version 7" sends them
+# to upgrade. Collapsing them into one message costs a support round trip.
+fn read_header(r: Reader) -> Str {
+  if len(r.src) < HEADER_LEN {
+    return "not a twill save file: only " + str(len(r.src)) + " bytes"
+  }
+  if r.src[0] != MAGIC_R or r.src[1] != MAGIC_S or r.src[2] != MAGIC_T or r.src[3] != MAGIC_R {
+    return "not a twill save file: the first four bytes are not the save magic"
+  }
+  let ver = r.src[4]
+  if ver != SAVE_VERSION {
+    return "twill save-file version " + str(ver)
+      + " is not version " + str(SAVE_VERSION) + ", which is the only version this build reads"
+  }
+  r.pos = HEADER_LEN
+  ""
+}
+
+# Advance past one value without building it. This is the function that makes
+# reading a header out of a large archive cheap: finding the seventh field of a
+# record means skipping six values, and skipping a 400 MB tensor is an addition
+# rather than 50 million float reads.
+fn skip_value(r: Reader) {
+  if len(r.err) > 0 {
+    return
+  }
+  let tag = read_byte(r)
+  if tag == TAG_TENSOR {
+    let rank = read_i32(r)
+    if rank < 0 or rank > MAX_RANK {
+      fail(r, "corrupt file: tensor rank " + str(rank))
+      return
+    }
+    r.pos = r.pos + rank * 4
+    let n = read_i64(r)
+    if n < 0 {
+      fail(r, "corrupt file: tensor element count " + str(n))
+      return
+    }
+    if not need(r, n * 8) {
+      return
+    }
+    r.pos = r.pos + n * 8
+    return
+  }
+  if tag == TAG_LIST {
+    let n = read_count(r)
+    let i: I64 = 0
+    while i < n {
+      skip_value(r)
+      i = i + 1
+    }
+    return
+  }
+  if tag == TAG_RECORD {
+    let n = read_count(r)
+    let i: I64 = 0
+    while i < n {
+      read_str(r)
+      skip_value(r)
+      i = i + 1
+    }
+    return
+  }
+  if tag == TAG_BOOL {
+    read_byte(r)
+    return
+  }
+  if tag == TAG_STR {
+    read_str(r)
+    return
+  }
+  if tag == TAG_UNIT {
+    return
+  }
+  if tag == TAG_MODEL {
+    let n = read_count(r)
+    read_bytes(r, n)
+    return
+  }
+  fail(r, "corrupt file: unknown value tag " + str(tag))
+}
+
+# The byte range one value occupies, as a half-open [lo, hi). Used to hash a
+# subtree over its exact stored bytes.
+struct Span {
+  lo: I64,
+  hi: I64,
+}
+
+fn value_span(r: Reader) -> Span {
+  let lo = r.pos
+  skip_value(r)
+  Span { lo: lo, hi: r.pos }
+}
+
+# Position the reader at the value of `key` in the record starting at the
+# cursor, and return its span. `found` is false when the record has no such key,
+# which is not an error: a reader for format 1 asks a format 2 file for fields
+# it does not have, and that is exactly the case the compatibility rule in
+# docs/format.md says must work.
+struct Lookup {
+  span: Span,
+  found: Bool,
+}
+
+fn find_field(r: Reader, key: Str) -> Lookup {
+  let miss = Lookup { span: Span { lo: 0, hi: 0 }, found: false }
+  let tag = read_byte(r)
+  if tag != TAG_RECORD {
+    fail(r, "expected a record and found value tag " + str(tag))
+    return miss
+  }
+  let n = read_count(r)
+  let i: I64 = 0
+  while i < n {
+    let k = read_str(r)
+    if len(r.err) > 0 {
+      return miss
+    }
+    let sp = value_span(r)
+    if k == key {
+      return Lookup { span: sp, found: true }
+    }
+    i = i + 1
+  }
+  miss
+}
+
+# The scalar behind a rank-0 tensor. Records written by selvedge store numbers
+# this way because that is what `save` does with a number, so a selvedge archive
+# stays an ordinary twill save file and `load` on it works with no selvedge
+# present. That property is worth more than a compact integer encoding.
+fn read_scalar(r: Reader) -> F64 {
+  let tag = read_byte(r)
+  if tag != TAG_TENSOR {
+    fail(r, "expected a number and found value tag " + str(tag))
+    return 0.0
+  }
+  let rank = read_i32(r)
+  if rank != 0 {
+    fail(r, "expected a rank-0 tensor and found rank " + str(rank))
+    return 0.0
+  }
+  let n = read_i64(r)
+  if n != 1 {
+    fail(r, "expected one element in a rank-0 tensor and found " + str(n))
+    return 0.0
+  }
+  read_f64(r)
+}
+
+fn read_field_i64(src: Str, key: Str) -> I64 {
+  i64(read_field_f64(src, key))
+}
+
+fn read_field_f64(src: Str, key: Str) -> F64 {
+  let r = reader(src)
+  if len(read_header(r)) > 0 {
+    return 0.0
+  }
+  let f = find_field(r, key)
+  if not f.found {
+    return 0.0
+  }
+  let v = reader(src)
+  v.pos = f.span.lo
+  read_scalar(v)
+}
+
+fn read_field_str(src: Str, key: Str) -> Str {
+  let r = reader(src)
+  if len(read_header(r)) > 0 {
+    return ""
+  }
+  let f = find_field(r, key)
+  if not f.found {
+    return ""
+  }
+  let v = reader(src)
+  v.pos = f.span.lo
+  let tag = read_byte(v)
+  if tag != TAG_STR {
+    return ""
+  }
+  read_str(v)
+}
+
+# ---- writing ---------------------------------------------------------------
+#
+# The writer covers the value kinds selvedge builds itself: strings, numbers,
+# bools and records of them. It does not write tensors of rank above zero,
+# because selvedge never has a parameter tensor it built rather than received,
+# and a write path with no caller is a write path with no test.
+
+fn put_header(out: Bytes) {
+  b.push(out, MAGIC_R)
+  b.push(out, MAGIC_S)
+  b.push(out, MAGIC_T)
+  b.push(out, MAGIC_R)
+  b.push(out, SAVE_VERSION)
+}
+
+fn put_i32(out: Bytes, v: I64) {
+  let x = v
+  if x < 0 {
+    x = x + 4294967296
+  }
+  let i: I64 = 0
+  while i < 4 {
+    b.push(out, and(shr(x, i * 8), 255))
+    i = i + 1
+  }
+}
+
+fn put_i64(out: Bytes, v: I64) {
+  let i: I64 = 0
+  while i < 8 {
+    b.push(out, and(ushr(v, i * 8), 255))
+    i = i + 1
+  }
+}
+
+fn put_f64(out: Bytes, x: F64) {
+  put_i64(out, f64_bits(x))
+}
+
+fn put_str(out: Bytes, s: Str) {
+  b.push(out, TAG_STR)
+  put_i32(out, len(s))
+  b.push_text(out, s)
+}
+
+fn put_bool(out: Bytes, v: Bool) {
+  b.push(out, TAG_BOOL)
+  if v {
+    b.push(out, 1)
+  } else {
+    b.push(out, 0)
+  }
+}
+
+# A number, as the rank-0 tensor the reference writes for one.
+fn put_number(out: Bytes, x: F64) {
+  b.push(out, TAG_TENSOR)
+  put_i32(out, 0)
+  put_i64(out, 1)
+  put_f64(out, x)
+}
+
+# A record header. The caller then writes `count` key-and-value pairs with
+# put_key followed by one value. Splitting it this way rather than taking a
+# built dictionary is what keeps the key order under the caller's control, and
+# the key order is part of the bytes.
+fn put_record(out: Bytes, count: I64) {
+  b.push(out, TAG_RECORD)
+  put_i32(out, count)
+}
+
+fn put_key(out: Bytes, key: Str) {
+  put_i32(out, len(key))
+  b.push_text(out, key)
+}
+
+fn put_list(out: Bytes, count: I64) {
+  b.push(out, TAG_LIST)
+  put_i32(out, count)
+}
+
+# Logical right shift. `shr` is arithmetic on I64, so shifting a negative value
+# down smears sign bits into the byte being extracted and every put_i64 of a
+# negative number would write 0xff bytes. twill's own `src/float.tw` carries the
+# same helper for the same reason; see docs/needs.md entry 8.
+fn ushr(x: I64, k: I64) -> I64 {
+  if k == 0 {
+    return x
+  }
+  if x >= 0 {
+    return shr(x, k)
+  }
+  or(shr(and(x, not(shl(1, 63))), k), shl(1, 63 - k))
+}

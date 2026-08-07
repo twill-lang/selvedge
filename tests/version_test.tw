@@ -1,0 +1,89 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/version.tw" as ver
+
+fn a_plain_version_parses() {
+  let v = ver.parse("1.2.3")
+  t.check("ok", v.ok)
+  t.equal_i64("major", v.major, 1)
+  t.equal_i64("minor", v.minor, 2)
+  t.equal_i64("patch", v.patch, 3)
+}
+
+fn a_leading_v_is_tolerated_because_git_tags_have_one() {
+  t.equal_str("v1.2.3 is 1.2.3", ver.to_str(ver.parse("v1.2.3")), "1.2.3")
+}
+
+fn a_malformed_version_is_refused_rather_than_guessed_at() {
+  t.check("two components is not a version", not ver.parse("1.2").ok)
+  t.check("four components is not a version", not ver.parse("1.2.3.4").ok)
+  t.check("an empty component is not zero", not ver.parse("1..3").ok)
+  t.check("letters are not a version", not ver.parse("1.2.x").ok)
+  t.check("a pre-release tag is refused rather than mis-ordered",
+    not ver.parse("1.0.0-rc1").ok)
+}
+
+fn ordering_is_by_component_and_not_lexical() {
+  t.equal_i64("1.10.0 is above 1.9.0",
+    ver.compare(ver.parse("1.10.0"), ver.parse("1.9.0")), 1)
+  t.equal_i64("2.0.0 is above 1.99.99",
+    ver.compare(ver.parse("2.0.0"), ver.parse("1.99.99")), 1)
+  t.equal_i64("equal is zero",
+    ver.compare(ver.parse("1.2.3"), ver.parse("1.2.3")), 0)
+}
+
+fn an_exact_constraint_matches_only_itself() {
+  let c = ver.parse_constraint("1.2.3")
+  t.check("1.2.3 satisfies it", ver.satisfies(ver.parse("1.2.3"), c))
+  t.check("1.2.4 does not", not ver.satisfies(ver.parse("1.2.4"), c))
+}
+
+fn a_caret_constraint_holds_the_major_and_floats_upward() {
+  let c = ver.parse_constraint("^1.2.0")
+  t.check("1.2.0 satisfies it", ver.satisfies(ver.parse("1.2.0"), c))
+  t.check("1.9.4 satisfies it", ver.satisfies(ver.parse("1.9.4"), c))
+  t.check("1.1.9 does not, it is below the base",
+    not ver.satisfies(ver.parse("1.1.9"), c))
+  t.check("2.0.0 does not, the contract changed",
+    not ver.satisfies(ver.parse("2.0.0"), c))
+}
+
+fn a_caret_below_one_is_narrow_because_that_is_where_contracts_move() {
+  let c = ver.parse_constraint("^0.2.3")
+  t.check("0.2.3 satisfies it", ver.satisfies(ver.parse("0.2.3"), c))
+  t.check("0.2.9 satisfies it", ver.satisfies(ver.parse("0.2.9"), c))
+  t.check("0.3.0 does not", not ver.satisfies(ver.parse("0.3.0"), c))
+
+  let c2 = ver.parse_constraint("^0.0.3")
+  t.check("0.0.3 satisfies it", ver.satisfies(ver.parse("0.0.3"), c2))
+  t.check("0.0.4 does not", not ver.satisfies(ver.parse("0.0.4"), c2))
+}
+
+fn star_matches_anything_valid_and_nothing_invalid() {
+  let c = ver.parse_constraint("*")
+  t.check("a version satisfies it", ver.satisfies(ver.parse("0.0.1"), c))
+  t.check("an unparseable version does not", not ver.satisfies(ver.parse("nope"), c))
+}
+
+fn an_unrecognised_constraint_is_refused_and_not_widened() {
+  # The important one. A constraint spelling selvedge does not understand must
+  # not become "any", because a surprise model swap is discovered in production
+  # and a parse error is discovered immediately.
+  t.check("a tilde range is refused", not ver.parse_constraint("~1.2.3").ok)
+  t.check("a comparison is refused", not ver.parse_constraint(">=1.2.3").ok)
+  t.check("a range is refused", not ver.parse_constraint("1.0.0 - 2.0.0").ok)
+  t.check("and a refused constraint satisfies nothing",
+    not ver.satisfies(ver.parse("1.5.0"), ver.parse_constraint("~1.2.3")))
+}
+
+a_plain_version_parses()
+a_leading_v_is_tolerated_because_git_tags_have_one()
+a_malformed_version_is_refused_rather_than_guessed_at()
+ordering_is_by_component_and_not_lexical()
+an_exact_constraint_matches_only_itself()
+a_caret_constraint_holds_the_major_and_floats_upward()
+a_caret_below_one_is_narrow_because_that_is_where_contracts_move()
+star_matches_anything_valid_and_nothing_invalid()
+an_unrecognised_constraint_is_refused_and_not_widened()
+t.report("version")

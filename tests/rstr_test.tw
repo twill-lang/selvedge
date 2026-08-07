@@ -1,0 +1,191 @@
+mode systems
+
+# The compatibility test that matters.
+#
+# `a_record_encodes_to_exactly_these_bytes` is the one to read. Its expected
+# bytes were produced from the reference implementation's format, not from
+# selvedge's writer, so the two agreeing is evidence rather than a tautology.
+# Every other test here is downstream of it.
+
+import "harness.tw" as t
+import "../src/rstr.tw" as rstr
+import "../src/bytes_compat.tw" as b
+
+# A twill save file holding the record { tag: "hi", format: 1 }.
+#
+#   82 83 84 82          "RSTR"
+#   01                   save version 1
+#   82                   'R', a record
+#   02 00 00 00          two fields, i32 little-endian
+#   03 00 00 00 "tag"    key length, key
+#   83 02 00 00 00 "hi"  'S', length, bytes
+#   06 00 00 00 "format" key length, key
+#   84                   'T', a tensor
+#   00 00 00 00          rank 0
+#   01 00 00 00 00 00 00 00   one element, i64
+#   00 00 00 00 00 00 f0 3f   1.0 as an IEEE 754 double, little-endian
+#
+# The two width choices in there are the ones a careless reader gets wrong: the
+# field count and the rank are i32, and the element count is i64.
+fn sample_bytes() -> Arr[I64] {
+  [
+    82, 83, 84, 82, 1,
+    82, 2, 0, 0, 0,
+    3, 0, 0, 0, 116, 97, 103,
+    83, 2, 0, 0, 0, 104, 105,
+    6, 0, 0, 0, 102, 111, 114, 109, 97, 116,
+    84, 0, 0, 0, 0,
+    1, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 240, 63,
+  ]
+}
+
+fn sample() -> Str {
+  let out = b.new()
+  let want = sample_bytes()
+  let i: I64 = 0
+  while i < len(want) {
+    b.push(out, want[i])
+    i = i + 1
+  }
+  b.to_str(out)
+}
+
+fn a_record_encodes_to_exactly_these_bytes() {
+  let out = b.new()
+  rstr.put_header(out)
+  rstr.put_record(out, 2)
+  rstr.put_key(out, "tag")
+  rstr.put_str(out, "hi")
+  rstr.put_key(out, "format")
+  rstr.put_number(out, 1.0)
+  let got = b.to_str(out)
+  let want = sample_bytes()
+  t.equal_i64("the encoding is the expected length", len(got), len(want))
+  let i: I64 = 0
+  let diffs: I64 = 0
+  while i < len(want) and i < len(got) {
+    if got[i] != want[i] {
+      diffs = diffs + 1
+      print("  byte " + str(i) + ": got " + str(got[i]) + " want " + str(want[i]))
+    }
+    i = i + 1
+  }
+  t.equal_i64("every byte matches the reference layout", diffs, 0)
+}
+
+fn the_magic_bytes_are_the_four_this_format_has_always_had() {
+  let out = b.new()
+  rstr.put_header(out)
+  let got = b.to_str(out)
+  t.equal_i64("byte 0", got[0], 82)
+  t.equal_i64("byte 1", got[1], 83)
+  t.equal_i64("byte 2", got[2], 84)
+  t.equal_i64("byte 3", got[3], 82)
+  t.equal_i64("and the version byte is 1", got[4], 1)
+}
+
+fn a_header_from_another_format_is_refused_by_name() {
+  let r = rstr.reader("not a twill save file at all")
+  t.check("a bad magic is refused", len(rstr.read_header(r)) > 0)
+}
+
+fn a_newer_save_version_is_refused_and_says_which() {
+  let out = b.new()
+  b.push(out, 82)
+  b.push(out, 83)
+  b.push(out, 84)
+  b.push(out, 82)
+  b.push(out, 7)
+  let r = rstr.reader(b.to_str(out))
+  let err = rstr.read_header(r)
+  t.check("version 7 is refused", len(err) > 0)
+  t.check("and the message names the version found", b.index_of(err, "7") >= 0)
+}
+
+fn a_field_is_found_by_name() {
+  t.equal_str("the string field reads back", rstr.read_field_str(sample(), "tag"), "hi")
+  t.equal_i64("the number field reads back", rstr.read_field_i64(sample(), "format"), 1)
+}
+
+fn a_missing_field_is_absence_and_not_an_error() {
+  # The compatibility rule depends on this: a format-1 reader asks a format-2
+  # file for fields it does not have, and gets nothing rather than a failure.
+  let r = rstr.reader(sample())
+  rstr.read_header(r)
+  let f = rstr.find_field(r, "nothing_named_this")
+  t.check("the field is not found", not f.found)
+  t.equal_str("and the reader is not in error", r.err, "")
+}
+
+fn a_value_span_covers_exactly_the_value() {
+  let r = rstr.reader(sample())
+  rstr.read_header(r)
+  let f = rstr.find_field(r, "tag")
+  t.check("found", f.found)
+  # 'S' plus a 4-byte length plus two bytes.
+  t.equal_i64("the string value occupies seven bytes", f.span.hi - f.span.lo, 7)
+}
+
+fn skipping_a_value_lands_on_the_next_one() {
+  let r = rstr.reader(sample())
+  rstr.read_header(r)
+  let f = rstr.find_field(r, "format")
+  t.check("the second field is reachable past the first", f.found)
+  t.equal_i64("the number occupies thirteen bytes", f.span.hi - f.span.lo, 13)
+  t.equal_i64("and the file ends there", f.span.hi, len(sample()))
+}
+
+fn a_truncated_file_is_reported_rather_than_read_past() {
+  let full = sample()
+  let r = rstr.reader(b.slice(full, 0, len(full) - 4))
+  rstr.read_header(r)
+  rstr.find_field(r, "format")
+  t.check("truncation is detected", len(r.err) > 0)
+}
+
+fn a_negative_length_is_corruption_and_not_an_allocation() {
+  let out = b.new()
+  rstr.put_header(out)
+  b.push(out, 82)
+  rstr.put_i32(out, -1)
+  let r = rstr.reader(b.to_str(out))
+  rstr.read_header(r)
+  rstr.find_field(r, "anything")
+  t.check("a negative count is refused", len(r.err) > 0)
+}
+
+fn a_float_survives_the_bit_pattern_round_trip() {
+  # Bit patterns, not decimal renderings. A value that only round-trips through
+  # text is a value whose low bits depend on a formatter.
+  let out = b.new()
+  rstr.put_header(out)
+  rstr.put_record(out, 1)
+  rstr.put_key(out, "x")
+  rstr.put_number(out, 0.1)
+  let got = rstr.read_field_f64(b.to_str(out), "x")
+  t.near("0.1 comes back exactly", got, 0.1, 0.0)
+}
+
+fn a_negative_integer_writes_four_bytes_and_not_eight() {
+  let out = b.new()
+  rstr.put_i32(out, -2)
+  let got = b.to_str(out)
+  t.equal_i64("length", len(got), 4)
+  t.equal_i64("byte 0", got[0], 254)
+  t.equal_i64("byte 3", got[3], 255)
+}
+
+a_record_encodes_to_exactly_these_bytes()
+the_magic_bytes_are_the_four_this_format_has_always_had()
+a_header_from_another_format_is_refused_by_name()
+a_newer_save_version_is_refused_and_says_which()
+a_field_is_found_by_name()
+a_missing_field_is_absence_and_not_an_error()
+a_value_span_covers_exactly_the_value()
+skipping_a_value_lands_on_the_next_one()
+a_truncated_file_is_reported_rather_than_read_past()
+a_negative_length_is_corruption_and_not_an_allocation()
+a_float_survives_the_bit_pattern_round_trip()
+a_negative_integer_writes_four_bytes_and_not_eight()
+t.report("rstr")

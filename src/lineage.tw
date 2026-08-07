@@ -1,0 +1,295 @@
+mode systems
+
+# lineage.tw: what produced this model.
+#
+# This is the part that makes a registry worth more than a directory of files.
+# A directory tells you a model exists. Lineage answers the question anyone
+# actually asks six months later, which is never "where is the file" and always
+# "why is this one worse than the one we had in March".
+#
+# The failure mode this file is written against is decorative provenance: a
+# `notes` field, filled in by hand, unchecked, that says "trained on the usual
+# data". It is worse than nothing, because it looks like an answer. So every
+# field below is one of two kinds and each is marked:
+#
+#   IDENTIFYING   a value that pins something down exactly, and can be checked
+#                 by someone who has the thing. A dataset digest, a commit sha.
+#                 selvedge compares these.
+#
+#   DESCRIPTIVE   free text for a human. selvedge stores it, renders it, and
+#                 never compares it or draws a conclusion from it.
+#
+# The rule that keeps the distinction honest: `is_reproducible` below returns
+# true only when every identifying field is present. A lineage with a beautiful
+# description and no dataset digest is not reproducible and says so.
+#
+# ---- hyperparameters -------------------------------------------------------
+#
+# Held as parallel name and value arrays, in the order they were recorded, for
+# the same reason `Metrics` is: this goes into the digest and into the card, and
+# an iteration order that varied between twill versions would change the digest
+# of a model nobody retrained. docs/needs.md entry 6.
+#
+# The values are strings, not numbers. Learning rate is a number, the optimiser
+# is "adam", the schedule is "cosine, 3 warmup", and a lineage that could only
+# record the first of those would record the least interesting one. Numbers go
+# in as their rendering, which is lossy for comparison and exactly right for the
+# thing this is: a record of what was set.
+
+import "bytes_compat.tw" as b
+import "digest.tw" as dg
+
+struct Lineage {
+  # IDENTIFYING. A digest of the training data. selvedge does not compute this:
+  # it has no idea where your data came from or what a row is. What it does is
+  # insist on the string and refuse to call a model reproducible without it.
+  # `data_digest_of_file` below covers the common case of a single CSV.
+  data_digest: Str,
+  # DESCRIPTIVE. Where that data is: a path, a bucket, a table name, a ticket.
+  data_source: Str,
+  # IDENTIFYING. Rows the model was fit on. A number, because a lineage whose
+  # row count differs from the recorded one is a lineage pointing at different
+  # data even when the digest is missing, and that check is cheap.
+  data_rows: I64,
+  # IDENTIFYING. The commit of the code that ran the training. Full sha, not
+  # abbreviated: an abbreviated sha is a prefix match on a repository that will
+  # be larger later.
+  code_commit: Str,
+  # DESCRIPTIVE. Which repository that commit is in.
+  code_repo: Str,
+  # DESCRIPTIVE. True when the working tree had uncommitted changes. Recorded
+  # rather than refused, because the run happened either way and a lineage that
+  # cannot express "this was trained off a dirty tree" will be filled in with a
+  # lie.
+  code_dirty: Bool,
+  # IDENTIFYING, jointly. Hyperparameters, in the order set.
+  hp_names: Arr[Str],
+  hp_values: Arr[Str],
+  # IDENTIFYING. The name and version of the archive this one was derived from,
+  # empty for a model trained from scratch. This is what makes lineage a chain
+  # rather than a label; src/registry.tw walks it.
+  parent_name: Str,
+  parent_version: Str,
+  # IDENTIFYING. The parent's content digest, so a chain can be verified rather
+  # than trusted. A parent named but not digested is a link that survives the
+  # parent being retrained under the same version, which is precisely the case
+  # that ruins an investigation.
+  parent_digest: Str,
+  # DESCRIPTIVE. When, as free text in whatever form the caller has. twill has
+  # no clock; see docs/needs.md entry 5.
+  trained_at: Str,
+  # DESCRIPTIVE. Anything else.
+  note: Str,
+}
+
+fn empty() -> Lineage {
+  Lineage {
+    data_digest: "",
+    data_source: "",
+    data_rows: 0,
+    code_commit: "",
+    code_repo: "",
+    code_dirty: false,
+    hp_names: [],
+    hp_values: [],
+    parent_name: "",
+    parent_version: "",
+    parent_digest: "",
+    trained_at: "",
+    note: "",
+  }
+}
+
+fn from_data(source: Str, digest: Str, rows: I64) -> Lineage {
+  let l = empty()
+  l.data_source = source
+  l.data_digest = digest
+  l.data_rows = rows
+  l
+}
+
+fn set_code(l: Lineage, repo: Str, commit: Str, dirty: Bool) {
+  l.code_repo = repo
+  l.code_commit = commit
+  l.code_dirty = dirty
+}
+
+fn set_hyper(l: Lineage, name: Str, value: Str) {
+  let i: I64 = 0
+  while i < len(l.hp_names) {
+    if l.hp_names[i] == name {
+      l.hp_values[i] = value
+      return
+    }
+    i = i + 1
+  }
+  l.hp_names = arr_push(l.hp_names, name)
+  l.hp_values = arr_push(l.hp_values, value)
+}
+
+fn hyper(l: Lineage, name: Str) -> Str {
+  let i: I64 = 0
+  while i < len(l.hp_names) {
+    if l.hp_names[i] == name {
+      return l.hp_values[i]
+    }
+    i = i + 1
+  }
+  ""
+}
+
+fn set_parent(l: Lineage, name: Str, version: Str, digest: Str) {
+  l.parent_name = name
+  l.parent_version = version
+  l.parent_digest = digest
+}
+
+fn has_parent(l: Lineage) -> Bool = len(l.parent_name) > 0
+
+# The digest of a data file, for `data_digest`.
+#
+# Over the file's bytes, which means it is a digest of that file and not of the
+# data. Two exports of the same table with different column order hash
+# differently and are the same data; the same file read through a different
+# pipeline hashes identically and may not be. This is the honest limit of a
+# file-level digest and it is still worth having, because the question it does
+# answer, "is this the same file I trained on", is the one that comes up.
+fn data_digest_of_file(path: Str) -> Str {
+  let raw = read_text_or(path, "")
+  if len(raw) == 0 {
+    return ""
+  }
+  dg.hash(raw)
+}
+
+# True when every identifying field is filled in.
+#
+# The definition of reproducible selvedge is willing to defend: someone with the
+# named commit and the named data can run the recorded hyperparameters and
+# expect this model. It does not claim they will get it bit for bit. That needs
+# the seed, which is a hyperparameter, so it is checked separately below rather
+# than folded in and forgotten.
+fn is_reproducible(l: Lineage) -> Bool {
+  len(l.data_digest) > 0
+    and l.data_rows > 0
+    and len(l.code_commit) > 0
+    and len(l.hp_names) > 0
+    and not l.code_dirty
+}
+
+# Why not, as a list, so a tool can print all of them rather than the first.
+fn gaps(l: Lineage) -> Arr[Str] {
+  let out: Arr[Str] = []
+  if len(l.data_digest) == 0 {
+    out = arr_push(out, "no data digest: the training data cannot be identified")
+  }
+  if l.data_rows <= 0 {
+    out = arr_push(out, "no row count: a dataset of a different size would not be noticed")
+  }
+  if len(l.code_commit) == 0 {
+    out = arr_push(out, "no code commit: the training program cannot be recovered")
+  }
+  if len(l.hp_names) == 0 {
+    out = arr_push(out, "no hyperparameters: the run cannot be repeated")
+  }
+  if l.code_dirty {
+    out = arr_push(out, "the working tree was dirty: the named commit is not what ran")
+  }
+  if len(hyper(l, "seed")) == 0 {
+    out = arr_push(out, "no seed recorded: a repeat will be close and not identical")
+  }
+  if has_parent(l) and len(l.parent_digest) == 0 {
+    out = arr_push(out, "a parent is named without a digest: the link cannot be verified")
+  }
+  out
+}
+
+# A digest over the identifying fields only.
+#
+# Two models with the same lineage digest were produced by the same inputs as
+# far as anything recorded can tell. Two with different ones were not, and the
+# difference is findable by diffing the fields. Descriptive fields are excluded
+# deliberately: a reworded note is not a different training run, and a lineage
+# digest that changed when someone fixed a typo would be a digest nobody used.
+fn digest(l: Lineage) -> Str {
+  let out = b.new()
+  b.push_text(out, "data:")
+  b.push_text(out, l.data_digest)
+  b.push_text(out, "|rows:")
+  b.push_text(out, str(l.data_rows))
+  b.push_text(out, "|commit:")
+  b.push_text(out, l.code_commit)
+  b.push_text(out, "|dirty:")
+  if l.code_dirty {
+    b.push_text(out, "1")
+  } else {
+    b.push_text(out, "0")
+  }
+  b.push_text(out, "|parent:")
+  b.push_text(out, l.parent_digest)
+  b.push_text(out, "|hp:")
+  let i: I64 = 0
+  while i < len(l.hp_names) {
+    if i > 0 {
+      b.push_text(out, ";")
+    }
+    b.push_text(out, l.hp_names[i])
+    b.push_text(out, "=")
+    b.push_text(out, l.hp_values[i])
+    i = i + 1
+  }
+  dg.hash(b.to_str(out))
+}
+
+# The fields on which two lineages differ, identifying fields only.
+#
+# This is the function the whole file exists for. "Why is this one worse" is
+# answered by running this against the one that was better, and getting back
+# "commit" and "lr" rather than a wall of text.
+fn diff(a: Lineage, x: Lineage) -> Arr[Str] {
+  let out: Arr[Str] = []
+  if a.data_digest != x.data_digest {
+    out = arr_push(out, "data")
+  }
+  if a.data_rows != x.data_rows {
+    out = arr_push(out, "rows")
+  }
+  if a.code_commit != x.code_commit {
+    out = arr_push(out, "commit")
+  }
+  if a.code_dirty != x.code_dirty {
+    out = arr_push(out, "dirty")
+  }
+  if a.parent_digest != x.parent_digest {
+    out = arr_push(out, "parent")
+  }
+  let i: I64 = 0
+  while i < len(a.hp_names) {
+    if hyper(x, a.hp_names[i]) != a.hp_values[i] {
+      out = arr_push(out, a.hp_names[i])
+    }
+    i = i + 1
+  }
+  # Names present in x and absent from a. The loop above cannot see them,
+  # because it walks a's names, and a hyperparameter that was dropped is as much
+  # a difference as one that changed.
+  i = 0
+  while i < len(x.hp_names) {
+    if not has_hyper(a, x.hp_names[i]) {
+      out = arr_push(out, x.hp_names[i])
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn has_hyper(l: Lineage, name: Str) -> Bool {
+  let i: I64 = 0
+  while i < len(l.hp_names) {
+    if l.hp_names[i] == name {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}

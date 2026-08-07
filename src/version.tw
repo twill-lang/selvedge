@@ -1,0 +1,186 @@
+mode systems
+
+# version.tw: model versions, and the constraints a registry resolves.
+#
+# A model version is not a package version and the difference is worth stating,
+# because reusing the semver vocabulary without reusing its meaning is how a
+# registry ends up with numbers nobody trusts.
+#
+#   major   the input or output contract changed. A caller written against the
+#           previous major will pass the wrong shape or misread the output.
+#   minor   retrained, same contract, metrics moved. Swapping it in is safe for
+#           a caller and is not safe for anyone comparing yesterday's scores to
+#           today's.
+#   patch   the artifact changed and the weights did not. Repacked, remetadata'd,
+#           relineaged.
+#
+# That is the rule selvedge asks users to follow, and selvedge cannot enforce it.
+# What it can do is make the contract part of the archive, so `major` is
+# checkable rather than a promise: `archive.signature_digest` is a hash of the
+# declared input and output shapes, and `registry.check_contract` reports when
+# two versions share a major and disagree about it. A constraint solver that
+# resolved `^1.2.0` to something with a different input shape would be worse
+# than useless, because it would look like it worked.
+#
+# Pre-release and build metadata are absent, following spool. Pre-release
+# ordering is where semver implementations grow their bugs, and a registry with
+# a few dozen models does not earn the complexity. A tag like "1.0.0-rc1" is
+# refused rather than silently mis-sorted.
+
+import "bytes_compat.tw" as b
+
+struct Version {
+  major: I64,
+  minor: I64,
+  patch: I64,
+  # ok is false when parsing failed. The subset has no Opt, so a sentinel field
+  # is how failure is reported without aborting. docs/needs.md entry 3.
+  ok: Bool,
+}
+
+fn bad() -> Version = Version { major: 0, minor: 0, patch: 0, ok: false }
+
+fn version(major: I64, minor: I64, patch: I64) -> Version {
+  Version { major: major, minor: minor, patch: patch, ok: true }
+}
+
+# "1.2.3", tolerating a leading "v" so a git tag can be handed in unchanged.
+fn parse(raw: Str) -> Version {
+  let text = raw
+  if b.starts_with(text, "v") {
+    text = b.slice(text, 1, len(text))
+  }
+  let parts = split_dot(text)
+  if len(parts) != 3 {
+    return bad()
+  }
+  let major = parse_i64(parts[0])
+  let minor = parse_i64(parts[1])
+  let patch = parse_i64(parts[2])
+  if major < 0 or minor < 0 or patch < 0 {
+    return bad()
+  }
+  version(major, minor, patch)
+}
+
+fn split_dot(s: Str) -> Arr[Str] {
+  let out: Arr[Str] = []
+  let start: I64 = 0
+  let i: I64 = 0
+  while i < len(s) {
+    if s[i] == 46 {
+      out = arr_push(out, b.slice(s, start, i))
+      start = i + 1
+    }
+    i = i + 1
+  }
+  arr_push(out, b.slice(s, start, len(s)))
+}
+
+# A non-negative decimal, or -1. Empty is -1 rather than 0, because "1..3"
+# parsing as 1.0.3 would accept a version nobody wrote.
+fn parse_i64(s: Str) -> I64 {
+  if len(s) == 0 {
+    return -1
+  }
+  let v: I64 = 0
+  let i: I64 = 0
+  while i < len(s) {
+    let c = s[i]
+    if c < 48 or c > 57 {
+      return -1
+    }
+    v = v * 10 + (c - 48)
+    i = i + 1
+  }
+  v
+}
+
+fn to_str(v: Version) -> Str {
+  i64_str(v.major) + "." + i64_str(v.minor) + "." + i64_str(v.patch)
+}
+
+fn i64_str(n: I64) -> Str = str(n)
+
+fn compare(a: Version, x: Version) -> I64 {
+  if a.major != x.major {
+    if a.major < x.major {
+      return -1
+    }
+    return 1
+  }
+  if a.minor != x.minor {
+    if a.minor < x.minor {
+      return -1
+    }
+    return 1
+  }
+  if a.patch != x.patch {
+    if a.patch < x.patch {
+      return -1
+    }
+    return 1
+  }
+  0
+}
+
+fn equal(a: Version, x: Version) -> Bool = compare(a, x) == 0
+
+let CONSTRAINT_EXACT: I64 = 0
+let CONSTRAINT_CARET: I64 = 1
+let CONSTRAINT_ANY: I64 = 2
+
+struct Constraint {
+  kind: I64,
+  base: Version,
+  text: Str,
+  ok: Bool,
+}
+
+# "1.2.3" exact, "^1.2.3" compatible, "*" any. Ranges, "~" and comparison
+# operators are not supported. An unrecognised spelling is refused rather than
+# widened to "any": quietly turning a narrow constraint into a broad one shows
+# up as a surprise model swap, which is the worst way to find out.
+fn parse_constraint(raw: Str) -> Constraint {
+  if raw == "*" {
+    return Constraint { kind: CONSTRAINT_ANY, base: bad(), text: "*", ok: true }
+  }
+  if b.starts_with(raw, "^") {
+    let base = parse(b.slice(raw, 1, len(raw)))
+    if not base.ok {
+      return Constraint { kind: CONSTRAINT_CARET, base: bad(), text: raw, ok: false }
+    }
+    return Constraint { kind: CONSTRAINT_CARET, base: base, text: "^" + to_str(base), ok: true }
+  }
+  let base = parse(raw)
+  if not base.ok {
+    return Constraint { kind: CONSTRAINT_EXACT, base: bad(), text: raw, ok: false }
+  }
+  Constraint { kind: CONSTRAINT_EXACT, base: base, text: to_str(base), ok: true }
+}
+
+# Caret below 1.0.0 follows cargo and npm: ^0.2.3 allows 0.2.x and not 0.3.0,
+# and ^0.0.3 allows only 0.0.3. Pre-1.0 minor bumps are where a model's contract
+# actually changes, so the narrow reading is the correct one here and not just
+# the conventional one.
+fn satisfies(v: Version, c: Constraint) -> Bool {
+  if not c.ok or not v.ok {
+    return false
+  }
+  if c.kind == CONSTRAINT_ANY {
+    return true
+  }
+  if c.kind == CONSTRAINT_EXACT {
+    return equal(v, c.base)
+  }
+  if compare(v, c.base) < 0 {
+    return false
+  }
+  if c.base.major > 0 {
+    return v.major == c.base.major
+  }
+  if c.base.minor > 0 {
+    return v.major == 0 and v.minor == c.base.minor
+  }
+  v.major == 0 and v.minor == 0 and v.patch == c.base.patch
+}

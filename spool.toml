@@ -1,0 +1,18 @@
+# selvedge, read by spool. The subset spool parses is comments, one-level
+# tables, quoted strings and single-line inline tables, and this file stays
+# inside it.
+name = "selvedge"
+version = "0.1.0"
+
+# Documentation only. twill has no package entry point, so spool records this
+# and shows it in `spool list`; it does not enforce it.
+entry = "src/archive.tw"
+
+[dependencies]
+# The language itself, pinned to the release whose std/json and whose save/load
+# encoding this source was written against. The encoding is the part that
+# matters: src/rstr.tw is a transcription of internal/interp/serialize.go and a
+# release that changed it would break this package silently rather than loudly.
+# spool has no notion of a toolchain dependency, so it is declared as an
+# ordinary git dependency.
+twill = { version = "^0.28.0", git = "https://github.com/martin-k-m/twill" }

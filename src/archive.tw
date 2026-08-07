@@ -1,0 +1,353 @@
+mode systems
+
+# archive.tw: a finished model, written down so it can be shipped.
+#
+# ---- the boundary with loom's checkpoint ----------------------------------
+#
+# loom's `src/checkpoint.tw` and this file both write a parameter tree to disk
+# and they are not the same thing. selvedge does not duplicate it, does not
+# replace it, and does not read its files.
+#
+#   A CHECKPOINT resumes a run. It is allowed to be tied to that run and it is
+#   useless without it: it carries adam's moments and its step count, the epoch
+#   index, the base seed, the batch size, and the callbacks' patience counters.
+#   loom refuses to restore one into a different seed or batch size, correctly,
+#   because doing so produces a run that is neither of the two runs. A
+#   checkpoint is a savepoint in a process.
+#
+#   AN ARCHIVE ships a result. It carries no optimiser state, no seed, no epoch
+#   and no batch size, because none of those mean anything to the person loading
+#   it, and it does carry things a checkpoint has no reason to: the input and
+#   output contract, the metrics the model was accepted on, the lineage that
+#   produced it, and a content hash over the bytes. An archive is an artifact.
+#
+# The consequence to hold on to: a checkpoint is not an archive with fields
+# missing, and an archive is not a checkpoint with fields added. Converting one
+# to the other is a deliberate act, `promote` below, and it is deliberate
+# because it is where someone decides that a particular epoch is the model.
+#
+# selvedge therefore does not depend on loom. That looks like a missed reuse and
+# it is the opposite: every consumer of an archive is on the inference side,
+# where a trainer is dead weight, and a dependency edge from the shipping format
+# to the training framework would put loom in the dependency tree of every
+# serving process in the ecosystem. `promote` takes a parameter tree and
+# metadata, which is what a loom user already has in their hand.
+#
+# ---- the file --------------------------------------------------------------
+#
+# A selvedge archive IS AN ORDINARY TWILL SAVE FILE. It begins with the same
+# four magic bytes, it is written by the same `save` builtin, and `load` on it
+# with no selvedge present returns a record you can read. The magic bytes are a
+# contract that does not change; see the long comment at the top of src/rstr.tw.
+#
+# The top-level value is a record with these fields in this order:
+#
+#   selvedge   Str   the literal "selvedge", so a reader can tell an archive
+#                    from an arbitrary save file before it interprets anything
+#   format     Num   the archive format version. See the rule below.
+#   meta       Str   the manifest, rendered as JSON by src/card.tw
+#   digest     Str   the SHA-256 of the params field's exact stored bytes
+#   params     Tree  the parameters, whatever shape the model has
+#
+# `params` is last on purpose. It is the only large field, and every other field
+# can therefore be read by skipping four small values rather than a tensor.
+#
+# The metadata is one JSON string rather than a nest of records. That is the
+# decision most worth arguing with, so the argument: the metadata has to be
+# readable by things that are not twill, a model card generator being the
+# obvious one, and JSON is that. Storing it structurally and rendering JSON on
+# demand would mean the rendering could differ from what was hashed, and then
+# the digest covers something nobody can reproduce. One representation, hashed
+# and shipped.
+#
+# ---- the compatibility rule, from the first commit ------------------------
+#
+# The format is versioned now, at 1, because a format that gains versioning
+# later has already broken: the files written before the version field exists
+# are indistinguishable from the ones written after it, and the reader that has
+# to tell them apart is guessing.
+#
+#   A reader accepts format <= FORMAT and refuses format > FORMAT by name.
+#   The refusal says the file's version and the reader's, because "unsupported
+#   format" without both numbers does not tell anyone which end to upgrade.
+#
+#   Adding a field is a minor change and does not bump FORMAT. Readers ignore
+#   fields they do not know; writers must not require them. This is why
+#   `find_field` in src/rstr.tw treats a missing key as absence rather than as
+#   an error.
+#
+#   Changing what an existing field means, removing one, or changing the order
+#   of the top-level record bumps FORMAT. The order is in the bytes and the
+#   digest covers bytes, so a reorder is a format change even though it loads to
+#   an equal value.
+#
+#   The digest's construction is part of the format. Changing what is hashed
+#   bumps FORMAT even if every field keeps its name, because a v1 reader would
+#   otherwise compute a mismatch and report corruption on a sound file.
+
+import "bytes_compat.tw" as b
+import "rstr.tw" as rstr
+import "digest.tw" as dg
+import "lineage.tw" as lin
+import "version.tw" as ver
+import "manifest.tw" as mf
+import "card.tw" as card
+
+let FORMAT: I64 = 1
+
+let TAG: Str = "selvedge"
+
+# An archive in memory: a manifest and the weights it describes.
+struct Archive {
+  man: mf.Manifest,
+  params: Tree,
+}
+
+# Build an archive from a trained parameter tree.
+#
+# Named `promote` rather than `new` because that is what the operation is: a
+# tree that was a training artifact five minutes ago becomes a shipping one,
+# and someone decided that. The name is the only place that decision is visible.
+fn promote(params: Tree, man: mf.Manifest) -> Archive {
+  Archive { man: man, params: params }
+}
+
+# ---- writing ---------------------------------------------------------------
+
+# Write an archive. Returns an empty string on success and a message otherwise.
+#
+# Two passes over the file, and the reason is not laziness. The digest covers
+# the params value's stored bytes, and those bytes do not exist until `save` has
+# produced them, so the sequence is: write with an empty digest, read the file
+# back, hash the params span, write again with the digest filled in. The
+# alternative, encoding the parameter tree in twill to hash it before writing,
+# needs structural reflection over a Tree that the subset does not have
+# (docs/needs.md entry 4).
+#
+# The cost is a doubled write, and for a large model that is real. It is stated
+# here rather than hidden, and `write_unhashed` below is the escape hatch for a
+# caller who has measured it and decided.
+fn write(a: Archive, path: Str) -> Str {
+  let err = write_unhashed(a, path)
+  if len(err) > 0 {
+    return err
+  }
+  let raw = read_file_text(path)
+  if len(raw) == 0 {
+    return "wrote " + path + " and read back nothing"
+  }
+  let d = digest_of_params(raw)
+  if len(d.err) > 0 {
+    return "wrote " + path + " and could not hash it back: " + d.err
+  }
+  a.man.digest = d.digest
+  a.man.params_bytes = d.size
+  write_unhashed(a, path)
+}
+
+# Write without computing the digest. The archive still declares whatever digest
+# its manifest currently holds, which for a fresh manifest is the empty string,
+# and `verify` reports an empty digest as unverifiable rather than as a match.
+# An archive that claimed integrity it had not computed would be the one
+# genuinely dangerous thing this library could do.
+fn write_unhashed(a: Archive, path: Str) -> Str {
+  if len(a.man.name) == 0 {
+    return "an archive needs a name"
+  }
+  if not a.man.version.ok {
+    return "an archive needs a valid version"
+  }
+  if a.man.format != FORMAT {
+    return "refusing to write format " + str(a.man.format)
+      + " with a writer that produces format " + str(FORMAT)
+  }
+  save(to_record(a), path)
+  ""
+}
+
+# The value that goes on disk. Field order is part of the format; see the rule
+# at the top of this file.
+fn to_record(a: Archive) -> Tree {
+  {
+    selvedge: TAG,
+    format: f64(a.man.format),
+    meta: card.render(a.man),
+    digest: a.man.digest,
+    params: a.params,
+  }
+}
+
+# ---- reading ---------------------------------------------------------------
+
+struct DigestResult {
+  digest: Str,
+  size: I64,
+  err: Str,
+}
+
+# The SHA-256 of the params field's exact stored bytes, and its length.
+#
+# Over the stored bytes and not over a re-encoding: two encoders that agree on
+# every value can still disagree on a byte, and a digest that depends on which
+# encoder produced it is a digest that fails on files nobody corrupted. The
+# bytes in the file are the only thing both ends can see.
+fn digest_of_params(raw: Str) -> DigestResult {
+  let r = rstr.reader(raw)
+  let herr = rstr.read_header(r)
+  if len(herr) > 0 {
+    return DigestResult { digest: "", size: 0, err: herr }
+  }
+  let f = rstr.find_field(r, "params")
+  if len(r.err) > 0 {
+    return DigestResult { digest: "", size: 0, err: r.err }
+  }
+  if not f.found {
+    return DigestResult { digest: "", size: 0, err: "this file has no params field" }
+  }
+  let payload = b.slice(raw, f.span.lo, f.span.hi)
+  DigestResult { digest: dg.hash(payload), size: f.span.hi - f.span.lo, err: "" }
+}
+
+struct Loaded {
+  arc: Archive,
+  err: Str,
+}
+
+# Read an archive, checking the framing and the format version before loading
+# the weights.
+#
+# The order matters. `load` on a 400 MB file that turns out to be someone's
+# checkpoint costs 400 MB and a confusing error from wherever the field access
+# fails. Reading the header out of the raw bytes first costs a few hundred and
+# produces a message that names the problem.
+fn read(path: Str) -> Loaded {
+  let raw = read_file_text(path)
+  if len(raw) == 0 {
+    return failed("cannot read " + path + ", or it is empty")
+  }
+  let r = rstr.reader(raw)
+  let herr = rstr.read_header(r)
+  if len(herr) > 0 {
+    return failed(path + ": " + herr)
+  }
+  let tag = rstr.read_field_str(raw, "selvedge")
+  if tag != TAG {
+    return failed(path + " is a twill save file but not a selvedge archive"
+      + ", which is what a loom checkpoint looks like from here")
+  }
+  let fmt = rstr.read_field_i64(raw, "format")
+  if fmt > FORMAT {
+    # The whole reason the format is versioned from the first commit.
+    return failed(path + " is archive format " + str(fmt)
+      + " and this build of selvedge reads up to format " + str(FORMAT)
+      + ": upgrade selvedge to read it")
+  }
+  if fmt < 1 {
+    return failed(path + " declares archive format " + str(fmt)
+      + ", which is not a format any selvedge ever wrote")
+  }
+  let rec = load(path)
+  let man = card.parse(rec.meta)
+  if len(man.err) > 0 {
+    return failed(path + ": " + man.err)
+  }
+  man.man.digest = rec.digest
+  Loaded { arc: Archive { man: man.man, params: rec.params }, err: "" }
+}
+
+fn failed(msg: Str) -> Loaded {
+  Loaded {
+    arc: Archive { man: mf.empty_manifest(), params: 0.0 },
+    err: msg,
+  }
+}
+
+# ---- integrity -------------------------------------------------------------
+
+let INTEGRITY_OK: I64 = 0
+let INTEGRITY_MISMATCH: I64 = 1
+let INTEGRITY_ABSENT: I64 = 2
+let INTEGRITY_UNREADABLE: I64 = 3
+
+struct Integrity {
+  status: I64,
+  declared: Str,
+  computed: Str,
+  detail: Str,
+}
+
+# Recompute the digest of a file on disk and compare it to the one the file
+# declares.
+#
+# What this catches: a truncated download, a corrupted disk, a file edited in
+# place, a parameter payload swapped for another. What it does not catch: an
+# attacker who rewrote the payload and the declared digest together. A digest
+# stored inside the thing it describes proves internal consistency and nothing
+# about origin, and saying so is the difference between integrity and a claim of
+# authenticity this library cannot make. The registry stores the digest
+# separately, at src/registry.tw, which is what turns this into a check with
+# something behind it: the registry entry is the second copy an attacker would
+# also have to rewrite.
+#
+# Signing is not in v0.1 and is not simulated. docs/needs.md entry 10.
+fn verify(path: Str) -> Integrity {
+  let raw = read_file_text(path)
+  if len(raw) == 0 {
+    return Integrity { status: INTEGRITY_UNREADABLE, declared: "", computed: "",
+                       detail: "cannot read " + path + ", or it is empty" }
+  }
+  let declared = rstr.read_field_str(raw, "digest")
+  if len(declared) == 0 {
+    return Integrity { status: INTEGRITY_ABSENT, declared: "", computed: "",
+                       detail: path + " declares no digest, so there is nothing to check against" }
+  }
+  let d = digest_of_params(raw)
+  if len(d.err) > 0 {
+    return Integrity { status: INTEGRITY_UNREADABLE, declared: declared, computed: "",
+                       detail: d.err }
+  }
+  if d.digest != declared {
+    return Integrity { status: INTEGRITY_MISMATCH, declared: declared, computed: d.digest,
+                       detail: path + " declares " + dg.short(declared, 12)
+                         + " and its parameters hash to " + dg.short(d.digest, 12) }
+  }
+  Integrity { status: INTEGRITY_OK, declared: declared, computed: d.digest, detail: "" }
+}
+
+fn is_intact(i: Integrity) -> Bool = i.status == INTEGRITY_OK
+
+# ---- the contract digest ---------------------------------------------------
+
+# A hash of the declared input and output shapes.
+#
+# This is what makes a major version checkable rather than a promise. Two
+# versions that share a major and disagree here have broken the rule at the top
+# of src/version.tw, and src/registry.tw reports it.
+fn signature_digest(s: mf.Signature) -> Str {
+  let out = b.new()
+  b.push_text(out, "in:")
+  push_shape(out, s.input)
+  b.push_text(out, "|out:")
+  push_shape(out, s.output)
+  b.push_text(out, "|kind:")
+  b.push_text(out, s.output_kind)
+  dg.hash(b.to_str(out))
+}
+
+fn push_shape(out: Bytes, dims: Arr[I64]) {
+  let i: I64 = 0
+  while i < len(dims) {
+    if i > 0 {
+      b.push_text(out, ",")
+    }
+    b.push_text(out, str(dims[i]))
+    i = i + 1
+  }
+}
+
+# `read_file` returns Res[Bytes, Str] in std/io and selvedge wants one spelling
+# for "the file, or nothing". Isolated here so that when the primitive settles
+# there is one line to change. docs/needs.md entry 2.
+fn read_file_text(path: Str) -> Str {
+  read_text_or(path, "")
+}

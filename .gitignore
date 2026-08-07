@@ -1,0 +1,14 @@
+# Written by spool. Reproduced from spool.toml and spool.lock, so it is not
+# source and does not belong in a commit.
+twill_modules/
+.spool/
+
+# Archives, model cards and registry indexes a program writes.
+models/
+*.slv
+
+# Files the tests write. There is no remove_file in the subset, so a test
+# cannot clean up after itself; see docs/needs.md entry 15.
+tmp_*.slv
+tmp_*.bin
+tmp_*.json

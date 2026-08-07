@@ -1,0 +1,179 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/archive.tw" as arc
+import "../src/manifest.tw" as mf
+import "../src/version.tw" as ver
+import "../src/lineage.tw" as lin
+import "../src/card.tw" as card
+import "../src/rstr.tw" as rstr
+import "../src/bytes_compat.tw" as b
+
+fn a_manifest() -> mf.Manifest {
+  let sig = mf.signature([-1, 4], [-1, 3], "logits")
+  let m = mf.manifest("blobs", ver.parse("1.0.0"), "mlp", sig)
+  m.description = "three-class blob classifier"
+  m.architecture_detail = "dense 4->16 relu, dense 16->3"
+  m.met = mf.metrics("blobs/val.csv", 240)
+  mf.record_metric(m.met, "accuracy", 0.9583)
+  mf.record_metric(m.met, "loss", 0.1180)
+  let l = lin.from_data("blobs/train.csv",
+    "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", 960)
+  lin.set_code(l, "github.com/example/blobs",
+    "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b", false)
+  lin.set_hyper(l, "seed", "20260807")
+  lin.set_hyper(l, "lr", "0.01")
+  m.prov = l
+  m
+}
+
+fn params() -> Tree {
+  { w1: [[0.1, 0.2, 0.3, 0.4]], b1: [0.0], w2: [[0.5]], b2: [0.0] }
+}
+
+fn an_archive_writes_and_reads_back_with_its_metadata_intact() {
+  let a = arc.promote(params(), a_manifest())
+  t.equal_str("the write succeeds", arc.write(a, "tmp_archive.slv"), "")
+  let got = arc.read("tmp_archive.slv")
+  t.equal_str("the read succeeds", got.err, "")
+  t.equal_str("the name survives", got.arc.man.name, "blobs")
+  t.equal_str("the version survives", ver.to_str(got.arc.man.version), "1.0.0")
+  t.equal_str("the architecture survives", got.arc.man.architecture, "mlp")
+  t.near("the metric survives", mf.metric_or(got.arc.man.met, "accuracy", 0.0),
+    0.9583, 0.000001)
+  t.equal_str("the output kind survives", got.arc.man.sig.output_kind, "logits")
+  t.check("the parameters survive", got.arc.params == params())
+}
+
+fn a_free_dimension_survives_the_json_round_trip_as_a_free_dimension() {
+  # A batch axis rendered as null in the card has to come back as -1 and not as
+  # 0. A shape with a 0 in it checks against nothing, silently.
+  let a = arc.promote(params(), a_manifest())
+  arc.write(a, "tmp_archive.slv")
+  let got = arc.read("tmp_archive.slv")
+  t.equal_i64("the batch axis is still free", got.arc.man.sig.input[0], -1)
+  t.equal_i64("and the feature axis is still four", got.arc.man.sig.input[1], 4)
+}
+
+fn the_lineage_survives_and_is_still_reproducible() {
+  let a = arc.promote(params(), a_manifest())
+  arc.write(a, "tmp_archive.slv")
+  let got = arc.read("tmp_archive.slv")
+  t.equal_str("the commit survives", got.arc.man.prov.code_commit,
+    "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b")
+  t.equal_str("the seed survives", lin.hyper(got.arc.man.prov, "seed"), "20260807")
+  t.equal_str("and the lineage digest is unchanged by the round trip",
+    lin.digest(got.arc.man.prov), lin.digest(a_manifest().prov))
+}
+
+fn a_written_archive_declares_a_digest_and_verifies() {
+  let a = arc.promote(params(), a_manifest())
+  arc.write(a, "tmp_archive.slv")
+  let integ = arc.verify("tmp_archive.slv")
+  t.check("it is intact", arc.is_intact(integ))
+  t.equal_i64("the digest is a full sha256", len(integ.declared), 64)
+  t.equal_str("declared and computed agree", integ.declared, integ.computed)
+}
+
+fn an_archive_written_without_a_digest_is_unverifiable_and_not_intact() {
+  # The dangerous alternative would be to treat "no digest" as "nothing to
+  # check, so fine". It is not fine and it is not a mismatch either; it is a
+  # third state with its own name.
+  let a = arc.promote(params(), a_manifest())
+  arc.write_unhashed(a, "tmp_unhashed.slv")
+  let integ = arc.verify("tmp_unhashed.slv")
+  t.check("it is not intact", not arc.is_intact(integ))
+  t.equal_i64("and the reason is that there is no digest to check",
+    integ.status, arc.INTEGRITY_ABSENT)
+}
+
+fn a_tampered_payload_is_caught() {
+  let a = arc.promote(params(), a_manifest())
+  arc.write(a, "tmp_archive.slv")
+  let good = arc.verify("tmp_archive.slv")
+
+  let b2 = arc.promote({ w1: [[0.1, 0.2, 0.3, 0.9]], b1: [0.0],
+                         w2: [[0.5]], b2: [0.0] }, a_manifest())
+  arc.write_unhashed(b2, "tmp_tampered.slv")
+  let tampered = arc.verify("tmp_tampered.slv")
+  t.check("different weights hash differently",
+    arc.digest_of_params(read_text_or("tmp_archive.slv", "")).digest
+      != arc.digest_of_params(read_text_or("tmp_tampered.slv", "")).digest)
+  t.check("the good file is intact", arc.is_intact(good))
+}
+
+fn an_archive_from_a_newer_format_is_refused_with_both_numbers() {
+  # The reason the format is versioned from the first commit. A reader that
+  # cannot tell "newer" from "corrupt" reports corruption on a sound file.
+  let out = b.new()
+  rstr.put_header(out)
+  rstr.put_record(out, 3)
+  rstr.put_key(out, "selvedge")
+  rstr.put_str(out, "selvedge")
+  rstr.put_key(out, "format")
+  rstr.put_number(out, 9.0)
+  rstr.put_key(out, "digest")
+  rstr.put_str(out, "")
+  let raw = b.to_str(out)
+  t.equal_i64("the format field reads as nine", rstr.read_field_i64(raw, "format"), 9)
+  write_text_or("tmp_future.slv", raw)
+  let got = arc.read("tmp_future.slv")
+  t.check("it is refused", len(got.err) > 0)
+  t.check("the message names the file's format", b.index_of(got.err, "9") >= 0)
+  t.check("and the reader's", b.index_of(got.err, "1") >= 0)
+}
+
+fn a_twill_save_file_that_is_not_an_archive_is_told_apart() {
+  # A loom checkpoint is exactly this: a valid twill save file with none of
+  # selvedge's fields. Loading it as an archive has to fail here rather than
+  # deep inside a field access.
+  save({ epoch: 10.0, params: params() }, "tmp_checkpoint.bin")
+  let got = arc.read("tmp_checkpoint.bin")
+  t.check("it is refused", len(got.err) > 0)
+  t.check("and the message says what it looks like",
+    b.index_of(got.err, "checkpoint") >= 0)
+}
+
+fn an_archive_with_no_name_is_refused_before_it_is_written() {
+  let m = mf.manifest("", ver.parse("1.0.0"), "mlp", mf.signature([], [], ""))
+  let a = arc.promote(params(), m)
+  t.check("a nameless archive is refused", len(arc.write_unhashed(a, "tmp_bad.slv")) > 0)
+}
+
+fn the_signature_digest_changes_only_with_the_contract() {
+  let a = mf.signature([-1, 4], [-1, 3], "logits")
+  let same = mf.signature([-1, 4], [-1, 3], "logits")
+  let wider = mf.signature([-1, 5], [-1, 3], "logits")
+  let probs = mf.signature([-1, 4], [-1, 3], "probabilities")
+  t.equal_str("the same contract hashes the same",
+    arc.signature_digest(a), arc.signature_digest(same))
+  t.check("a changed input shape changes it",
+    arc.signature_digest(a) != arc.signature_digest(wider))
+  t.check("and so does a changed output meaning",
+    arc.signature_digest(a) != arc.signature_digest(probs))
+}
+
+fn the_metadata_is_json_a_stranger_can_read() {
+  let rendered = card.render_card(a_manifest())
+  t.check("it mentions the model name", b.index_of(rendered, "\"blobs\"") >= 0)
+  t.check("it mentions the commit",
+    b.index_of(rendered, "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b") >= 0)
+  t.check("it states whether the model is reproducible",
+    b.index_of(rendered, "\"reproducible\"") >= 0)
+  let back = card.parse(card.render(a_manifest()))
+  t.equal_str("and it parses back", back.err, "")
+  t.equal_str("to the same name", back.man.name, "blobs")
+}
+
+an_archive_writes_and_reads_back_with_its_metadata_intact()
+a_free_dimension_survives_the_json_round_trip_as_a_free_dimension()
+the_lineage_survives_and_is_still_reproducible()
+a_written_archive_declares_a_digest_and_verifies()
+an_archive_written_without_a_digest_is_unverifiable_and_not_intact()
+a_tampered_payload_is_caught()
+an_archive_from_a_newer_format_is_refused_with_both_numbers()
+a_twill_save_file_that_is_not_an_archive_is_told_apart()
+an_archive_with_no_name_is_refused_before_it_is_written()
+the_signature_digest_changes_only_with_the_contract()
+the_metadata_is_json_a_stranger_can_read()
+t.report("archive")

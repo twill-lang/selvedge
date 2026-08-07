@@ -1,0 +1,306 @@
+mode systems
+
+# card.tw: the manifest as JSON, and back.
+#
+# The archive stores its metadata as one JSON string, so this file is both the
+# writer of the on-disk metadata and the model card generator. One file rather
+# than two on purpose: two renderings of the same manifest drift, and the one
+# that drifts is always the one used less, which is the card, which is the one
+# people read.
+#
+# JSON so that a model card can be generated without this library and without
+# twill. That is the requirement, and it is not a convenience. An archive whose
+# metadata could only be read by the tool that wrote it is a tool asking to be
+# trusted, and the whole point of writing lineage down is that it outlives the
+# tool.
+#
+# `std/json` is the renderer and the parser. selvedge does not write its own,
+# and where std/json is strict, selvedge is strict: no trailing commas, no
+# comments, no NaN literals. A model card that some other parser rejects is a
+# model card that gets rejected at the worst possible moment.
+#
+# ---- the numbers problem, stated ------------------------------------------
+#
+# JSON has one number type and `std/json` represents it as F64, so an integer
+# above 2^53 loses its low bits in both directions. The integers in a manifest
+# are a row count and a byte size. 2^53 rows is absurd; 2^53 bytes is nine
+# petabytes. Neither is reachable, so this is safe here. It would not be safe
+# for an identifier, which is why every digest in this format is a hex string
+# and stays one.
+
+import "std/json" as json
+import "version.tw" as ver
+import "lineage.tw" as lin
+import "manifest.tw" as mf
+
+# ---- rendering -------------------------------------------------------------
+
+# The manifest as a JSON object, keys in a fixed order.
+#
+# Fixed because this string is stored in the archive and because a card that
+# reorders itself between runs produces a diff every time it is regenerated.
+# `std/json` preserves insertion order, which is the property that makes this
+# possible at all.
+fn to_json(m: mf.Manifest) -> Json {
+  let root = json.object()
+  json.set_field(root, "selvedge_format", json.number(f64(m.format)))
+  json.set_field(root, "name", json.string(m.name))
+  json.set_field(root, "version", json.string(ver.to_str(m.version)))
+  json.set_field(root, "description", json.string(m.description))
+  json.set_field(root, "architecture", json.string(m.architecture))
+  json.set_field(root, "architecture_detail", json.string(m.architecture_detail))
+  json.set_field(root, "signature", signature_json(m.sig))
+  json.set_field(root, "metrics", metrics_json(m.met))
+  json.set_field(root, "lineage", lineage_json(m.prov))
+  json.set_field(root, "params_bytes", json.number(f64(m.params_bytes)))
+  json.set_field(root, "note", json.string(m.note))
+  root
+}
+
+fn signature_json(s: mf.Signature) -> Json {
+  let o = json.object()
+  json.set_field(o, "input", shape_json(s.input))
+  json.set_field(o, "output", shape_json(s.output))
+  json.set_field(o, "output_kind", json.string(s.output_kind))
+  o
+}
+
+# A shape as an array, with a free dimension rendered as null.
+#
+# null and not -1. A card is read by things that are not selvedge, and -1 in a
+# shape array is a value that someone, somewhere, will multiply. null cannot be
+# multiplied by accident. That is the whole argument and it is enough.
+fn shape_json(dims: Arr[I64]) -> Json {
+  let a = json.array()
+  let i: I64 = 0
+  while i < len(dims) {
+    if dims[i] < 0 {
+      json.push_item(a, json.null())
+    } else {
+      json.push_item(a, json.number(f64(dims[i])))
+    }
+    i = i + 1
+  }
+  a
+}
+
+fn metrics_json(m: mf.Metrics) -> Json {
+  let o = json.object()
+  json.set_field(o, "dataset", json.string(m.dataset))
+  json.set_field(o, "rows", json.number(f64(m.rows)))
+  let vals = json.object()
+  let i: I64 = 0
+  while i < len(m.names) {
+    json.set_field(vals, m.names[i], json.number(m.values[i]))
+    i = i + 1
+  }
+  json.set_field(o, "values", vals)
+  o
+}
+
+fn lineage_json(l: lin.Lineage) -> Json {
+  let o = json.object()
+  json.set_field(o, "data_digest", json.string(l.data_digest))
+  json.set_field(o, "data_source", json.string(l.data_source))
+  json.set_field(o, "data_rows", json.number(f64(l.data_rows)))
+  json.set_field(o, "code_repo", json.string(l.code_repo))
+  json.set_field(o, "code_commit", json.string(l.code_commit))
+  json.set_field(o, "code_dirty", json.boolean(l.code_dirty))
+  let hp = json.object()
+  let i: I64 = 0
+  while i < len(l.hp_names) {
+    json.set_field(hp, l.hp_names[i], json.string(l.hp_values[i]))
+    i = i + 1
+  }
+  json.set_field(o, "hyperparameters", hp)
+  json.set_field(o, "parent_name", json.string(l.parent_name))
+  json.set_field(o, "parent_version", json.string(l.parent_version))
+  json.set_field(o, "parent_digest", json.string(l.parent_digest))
+  json.set_field(o, "trained_at", json.string(l.trained_at))
+  json.set_field(o, "note", json.string(l.note))
+  # Derived, and written out rather than left for the reader to recompute. A
+  # card generator in another language would otherwise have to reimplement
+  # src/lineage.tw's rules to say whether a model is reproducible, and it would
+  # get them subtly different, and the difference would be invisible.
+  json.set_field(o, "lineage_digest", json.string(lin.digest(l)))
+  json.set_field(o, "reproducible", json.boolean(lin.is_reproducible(l)))
+  let g = json.array()
+  let gs = lin.gaps(l)
+  i = 0
+  while i < len(gs) {
+    json.push_item(g, json.string(gs[i]))
+    i = i + 1
+  }
+  json.set_field(o, "gaps", g)
+  o
+}
+
+# The compact rendering that goes into the archive. Compact because it is stored
+# and hashed, not read.
+fn render(m: mf.Manifest) -> Str = json.render(to_json(m))
+
+# The indented rendering, for a model card on disk. Two spaces, which is what
+# every diff tool and every reviewer already expects.
+fn render_card(m: mf.Manifest) -> Str = json.render_indent(to_json(m), 2)
+
+# ---- parsing ---------------------------------------------------------------
+
+struct Parsed {
+  man: mf.Manifest,
+  err: Str,
+}
+
+fn failed(msg: Str) -> Parsed = Parsed { man: mf.empty_manifest(), err: msg }
+
+# Read a manifest back out of an archive.
+#
+# Forgiving about missing fields and strict about malformed ones, and those are
+# different failures on purpose. A field this build does not know, or one a
+# newer writer added, is the compatibility rule in src/archive.tw working as
+# designed. A field that is present and is the wrong type is a corrupt file, and
+# the name and the version are the two whose absence is fatal, because without
+# them there is no model to talk about.
+fn parse(src: Str) -> Parsed {
+  match json.parse(src) {
+    Err(e) => failed("the archive metadata is not valid JSON: " + e.msg),
+    Ok(doc) => parse_doc(doc),
+  }
+}
+
+fn parse_doc(doc: Json) -> Parsed {
+  let name = str_field(doc, "name")
+  if len(name) == 0 {
+    return failed("the archive metadata has no name")
+  }
+  let v = ver.parse(str_field(doc, "version"))
+  if not v.ok {
+    return failed("the archive metadata has no readable version")
+  }
+  let sig_doc = obj_field(doc, "signature")
+  let sig = mf.signature(shape_field(sig_doc, "input"),
+                         shape_field(sig_doc, "output"),
+                         str_field(sig_doc, "output_kind"))
+  let m = mf.manifest(name, v, str_field(doc, "architecture"), sig)
+  m.format = i64(num_field(doc, "selvedge_format"))
+  m.description = str_field(doc, "description")
+  m.architecture_detail = str_field(doc, "architecture_detail")
+  m.params_bytes = i64(num_field(doc, "params_bytes"))
+  m.note = str_field(doc, "note")
+  m.met = parse_metrics(obj_field(doc, "metrics"))
+  m.prov = parse_lineage(obj_field(doc, "lineage"))
+  Parsed { man: m, err: "" }
+}
+
+# The keys of a JSON object, in insertion order, or an empty array if the value
+# is not an object. Isolated because it is the one place selvedge depends on
+# `std/json` objects being insertion-ordered, which they are and which the
+# round-trip of a card depends on.
+fn object_keys(v: Json) -> Arr[Str] {
+  match json.as_object(v) {
+    None => [],
+    Some(d) => dict_keys(d),
+  }
+}
+
+fn parse_metrics(doc: Json) -> mf.Metrics {
+  let m = mf.metrics(str_field(doc, "dataset"), i64(num_field(doc, "rows")))
+  let vals = obj_field(doc, "values")
+  let names = object_keys(vals)
+  let i: I64 = 0
+  while i < len(names) {
+    mf.record_metric(m, names[i], num_field(vals, names[i]))
+    i = i + 1
+  }
+  m
+}
+
+fn parse_lineage(doc: Json) -> lin.Lineage {
+  let l = lin.empty()
+  l.data_digest = str_field(doc, "data_digest")
+  l.data_source = str_field(doc, "data_source")
+  l.data_rows = i64(num_field(doc, "data_rows"))
+  l.code_repo = str_field(doc, "code_repo")
+  l.code_commit = str_field(doc, "code_commit")
+  l.code_dirty = bool_field(doc, "code_dirty")
+  l.parent_name = str_field(doc, "parent_name")
+  l.parent_version = str_field(doc, "parent_version")
+  l.parent_digest = str_field(doc, "parent_digest")
+  l.trained_at = str_field(doc, "trained_at")
+  l.note = str_field(doc, "note")
+  let hp = obj_field(doc, "hyperparameters")
+  let names = object_keys(hp)
+  let i: I64 = 0
+  while i < len(names) {
+    lin.set_hyper(l, names[i], str_field(hp, names[i]))
+    i = i + 1
+  }
+  l
+}
+
+# ---- accessors -------------------------------------------------------------
+#
+# Each collapses "absent" and "present but the wrong type" into the same
+# default. That is right here and would be wrong in std/json, which is why
+# std/json returns an Opt and this file does not: a manifest field that is a
+# number where a string was expected is a corrupt file, and there is nothing a
+# caller can do about it that is different from what it does about an absent
+# one. The two fields where absence is fatal are checked explicitly above.
+
+fn str_field(doc: Json, key: Str) -> Str {
+  match json.field(doc, key) {
+    None => "",
+    Some(v) => match json.as_string(v) {
+      None => "",
+      Some(s) => s,
+    },
+  }
+}
+
+fn num_field(doc: Json, key: Str) -> F64 {
+  match json.field(doc, key) {
+    None => 0.0,
+    Some(v) => match json.as_number(v) {
+      None => 0.0,
+      Some(x) => x,
+    },
+  }
+}
+
+fn bool_field(doc: Json, key: Str) -> Bool {
+  match json.field(doc, key) {
+    None => false,
+    Some(v) => match json.as_bool(v) {
+      None => false,
+      Some(x) => x,
+    },
+  }
+}
+
+fn obj_field(doc: Json, key: Str) -> Json {
+  match json.field(doc, key) {
+    None => json.object(),
+    Some(v) => v,
+  }
+}
+
+# A shape array, mapping null back to -1, which is the inverse of shape_json.
+fn shape_field(doc: Json, key: Str) -> Arr[I64] {
+  let out: Arr[I64] = []
+  match json.field(doc, key) {
+    None => out,
+    Some(v) => match json.as_array(v) {
+      None => out,
+      Some(items) => {
+        let i: I64 = 0
+        while i < len(items) {
+          match json.as_number(items[i]) {
+            None => out = arr_push(out, -1),
+            Some(x) => out = arr_push(out, i64(x)),
+          }
+          i = i + 1
+        }
+        out
+      },
+    },
+  }
+}

@@ -1,0 +1,520 @@
+mode systems
+
+# registry.tw: a local index of models, by name and version.
+#
+# ---- why this is not a directory of files ---------------------------------
+#
+# A directory of `.slv` files already gives you storage, naming and listing. If
+# that were all a registry did it would not be worth writing. Three things here
+# are not available from a filesystem:
+#
+#   1. Resolution. "the current 1.x" is a question about a set of versions, and
+#      answering it from filenames means parsing filenames, which means the
+#      naming convention becomes the schema.
+#   2. A second copy of every digest. The digest inside an archive proves the
+#      archive is internally consistent. The digest in the index is somewhere
+#      else, so a payload swapped in place is caught. One copy proves nothing
+#      an attacker cannot also rewrite; two copies in two files is a real, if
+#      modest, bar, and it is stated as modest at src/archive.tw `verify`.
+#   3. Lineage as a graph. `ancestry` and `children` below walk parent links
+#      across entries. A directory cannot answer "what else came off this
+#      model" without opening every file in it.
+#
+# ---- the index file --------------------------------------------------------
+#
+# One JSON file, at a path the caller chooses. JSON and not a twill save file,
+# deliberately, and this is the one place selvedge chooses JSON over its own
+# format: the index is the thing an operator opens in an editor at 3am when the
+# tool is the problem. A binary index would make selvedge a prerequisite for
+# understanding selvedge's own state.
+#
+# It is rewritten whole on every change. That is correct at the scale this is
+# for, a few thousand entries, and it is not correct at a scale this is not for.
+# There is no locking, because twill has no locking; two processes registering
+# at once will lose one of the writes. Said plainly rather than papered over:
+# this is a single-operator local registry. docs/needs.md entry 12.
+
+import "std/json" as json
+import "version.tw" as ver
+import "manifest.tw" as mf
+import "lineage.tw" as lin
+import "card.tw" as card
+import "archive.tw" as arc
+import "bytes_compat.tw" as b
+
+let INDEX_FORMAT: I64 = 1
+
+# One registered model version.
+#
+# The manifest is stored in full rather than by reference to the archive. That
+# duplicates it, and the duplication is the point: a registry that had to open a
+# 400 MB archive to answer "what were its metrics" would be opened once and then
+# worked around. The archive stays the authority, and `audit` below is the
+# function that checks the copy still agrees with it.
+struct Entry {
+  man: mf.Manifest,
+  # Where the archive is. Relative paths are relative to whatever the caller's
+  # working directory is, which selvedge cannot know and does not resolve.
+  path: Str,
+  # The digest as recorded at registration. Compared against the archive's own
+  # on `audit`, which is the point of storing it here.
+  digest: Str,
+  # A free-form label an operator moves around: "production", "candidate".
+  # Never interpreted, and deliberately not a fixed set, because every team's
+  # set is different and a wrong fixed set gets worked around with names like
+  # "production2".
+  stage: Str,
+}
+
+struct Registry {
+  path: Str,
+  entries: Arr[Entry],
+  err: Str,
+}
+
+fn empty(path: Str) -> Registry {
+  Registry { path: path, entries: [], err: "" }
+}
+
+# ---- registering -----------------------------------------------------------
+
+# Add a model version. Returns an empty string on success and a message
+# otherwise.
+#
+# Re-registering an existing name and version is refused rather than overwritten.
+# An immutable (name, version) is the property that makes everything else in
+# this file mean anything: an entry that can change under a reader turns a
+# lineage chain into a set of claims about whatever the file happens to say
+# today. Bump the patch instead; that is what patch is for.
+fn register(r: Registry, man: mf.Manifest, path: Str, stage: Str) -> Str {
+  if len(man.name) == 0 {
+    return "a registered model needs a name"
+  }
+  if not man.version.ok {
+    return "a registered model needs a valid version"
+  }
+  if len(man.digest) == 0 {
+    return "refusing to register " + mf.ref_str(man)
+      + " with no content digest: write the archive with archive.write first"
+  }
+  let existing = find(r, man.name, man.version)
+  if existing >= 0 {
+    return mf.ref_str(man) + " is already registered, pointing at "
+      + r.entries[existing].path
+      + ": a registered version does not change, so publish a new patch"
+  }
+  let contract = check_contract(r, man)
+  if len(contract) > 0 {
+    return contract
+  }
+  r.entries = arr_push(r.entries, Entry {
+    man: man,
+    path: path,
+    digest: man.digest,
+    stage: stage,
+  })
+  ""
+}
+
+# The rule from src/version.tw, enforced.
+#
+# Two versions sharing a major must agree about their input and output shapes.
+# This is the difference between a version number that is documentation and one
+# a resolver can act on: `^1.2.0` is only a safe thing to write if every 1.x
+# takes the same input, and nothing else in this library can promise that.
+#
+# Refused, not warned. A warning here is read once and then filtered.
+fn check_contract(r: Registry, man: mf.Manifest) -> Str {
+  let want = arc.signature_digest(man.sig)
+  let i: I64 = 0
+  while i < len(r.entries) {
+    let e = r.entries[i]
+    if e.man.name == man.name and e.man.version.major == man.version.major {
+      if arc.signature_digest(e.man.sig) != want {
+        return mf.ref_str(man) + " declares input " + mf.shape_str(man.sig.input)
+          + " and output " + mf.shape_str(man.sig.output)
+          + ", and " + mf.ref_str(e.man) + " shares its major version with input "
+          + mf.shape_str(e.man.sig.input) + " and output " + mf.shape_str(e.man.sig.output)
+          + ": a changed contract is a new major version"
+      }
+    }
+    i = i + 1
+  }
+  ""
+}
+
+fn find(r: Registry, name: Str, v: ver.Version) -> I64 {
+  let i: I64 = 0
+  while i < len(r.entries) {
+    if r.entries[i].man.name == name and ver.equal(r.entries[i].man.version, v) {
+      return i
+    }
+    i = i + 1
+  }
+  -1
+}
+
+fn set_stage(r: Registry, name: Str, v: ver.Version, stage: Str) -> Str {
+  let i = find(r, name, v)
+  if i < 0 {
+    return name + "@" + ver.to_str(v) + " is not registered"
+  }
+  r.entries[i].stage = stage
+  ""
+}
+
+# ---- listing ---------------------------------------------------------------
+
+# Every registered name, once, in the order first registered.
+#
+# Registration order rather than alphabetical, because it is the order that
+# carries information: a listing that starts with what the operator added first
+# reads as a history, and sorting it throws that away for tidiness.
+fn names(r: Registry) -> Arr[Str] {
+  let out: Arr[Str] = []
+  let i: I64 = 0
+  while i < len(r.entries) {
+    let n = r.entries[i].man.name
+    if not contains_str(out, n) {
+      out = arr_push(out, n)
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn contains_str(xs: Arr[Str], s: Str) -> Bool {
+  let i: I64 = 0
+  while i < len(xs) {
+    if xs[i] == s {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+# Every version of one name, ascending.
+#
+# Insertion sort, because the alternative is a generic sort with a comparison
+# function and the subset has neither. It is O(n^2) over the versions of one
+# model, which is a number in the tens. This is the fifth hand-written sort in
+# the ecosystem; see docs/needs.md entry 13.
+fn versions(r: Registry, name: Str) -> Arr[ver.Version] {
+  let out: Arr[ver.Version] = []
+  let i: I64 = 0
+  while i < len(r.entries) {
+    if r.entries[i].man.name == name {
+      let v = r.entries[i].man.version
+      let j = len(out)
+      out = arr_push(out, v)
+      while j > 0 and ver.compare(out[j - 1], v) > 0 {
+        out[j] = out[j - 1]
+        out[j - 1] = v
+        j = j - 1
+      }
+    }
+    i = i + 1
+  }
+  out
+}
+
+# ---- resolving -------------------------------------------------------------
+
+struct Resolved {
+  entry: Entry,
+  found: Bool,
+  err: Str,
+}
+
+fn not_resolved(msg: Str) -> Resolved {
+  Resolved {
+    entry: Entry { man: mf.empty_manifest(), path: "", digest: "", stage: "" },
+    found: false,
+    err: msg,
+  }
+}
+
+# The highest registered version of `name` satisfying `constraint`.
+#
+# Highest, not newest-registered. Those differ exactly when someone publishes a
+# fix to an old line after a new one, which is the case where "newest" is the
+# wrong answer and is also the case where nobody is paying attention.
+#
+# A constraint that no version satisfies is an error carrying the versions that
+# do exist. "nothing matches ^2.0.0" plus "1.4.2, 1.5.0 are registered" is one
+# message that ends the investigation; without the second half it starts one.
+fn resolve(r: Registry, name: Str, constraint: Str) -> Resolved {
+  let c = ver.parse_constraint(constraint)
+  if not c.ok {
+    return not_resolved("cannot read the version constraint " + constraint
+      + ": selvedge understands an exact version, a caret range, and *")
+  }
+  let all = versions(r, name)
+  if len(all) == 0 {
+    return not_resolved("no model named " + name + " is registered")
+  }
+  let best = -1
+  let i: I64 = 0
+  while i < len(r.entries) {
+    let e = r.entries[i]
+    if e.man.name == name and ver.satisfies(e.man.version, c) {
+      if best < 0 or ver.compare(e.man.version, r.entries[best].man.version) > 0 {
+        best = i
+      }
+    }
+    i = i + 1
+  }
+  if best < 0 {
+    return not_resolved("no version of " + name + " satisfies " + c.text
+      + "; registered: " + version_list(all))
+  }
+  Resolved { entry: r.entries[best], found: true, err: "" }
+}
+
+fn version_list(vs: Arr[ver.Version]) -> Str {
+  let parts: Arr[Str] = []
+  let i: I64 = 0
+  while i < len(vs) {
+    parts = arr_push(parts, ver.to_str(vs[i]))
+    i = i + 1
+  }
+  b.join(parts, ", ")
+}
+
+# The single entry carrying a stage label, if exactly one does.
+#
+# "if exactly one does" is load-bearing. Two entries labelled "production" is a
+# state an operator can reach with two calls to `set_stage`, and picking one of
+# them silently is how a rollback lands on the version it was rolling back from.
+fn resolve_stage(r: Registry, name: Str, stage: Str) -> Resolved {
+  let found = -1
+  let count: I64 = 0
+  let i: I64 = 0
+  while i < len(r.entries) {
+    if r.entries[i].man.name == name and r.entries[i].stage == stage {
+      found = i
+      count = count + 1
+    }
+    i = i + 1
+  }
+  if count == 0 {
+    return not_resolved("no version of " + name + " is labelled " + stage)
+  }
+  if count > 1 {
+    return not_resolved(str(count) + " versions of " + name + " are labelled "
+      + stage + ", so there is no single answer: clear the others first")
+  }
+  Resolved { entry: r.entries[found], found: true, err: "" }
+}
+
+# ---- lineage across entries ------------------------------------------------
+
+# The chain from a model back to its earliest recorded ancestor, oldest last.
+#
+# Stops at the first parent that is named and not registered, and returns what
+# it has. A partial chain is the honest answer and it is useful: knowing the
+# chain reaches a model nobody kept is itself the finding.
+#
+# The visited check is not defensive tidiness. Lineage is caller-supplied
+# strings, so A can name B as its parent while B names A, and a walk without it
+# would hang rather than report.
+fn ancestry(r: Registry, name: Str, v: ver.Version) -> Arr[Entry] {
+  let out: Arr[Entry] = []
+  let seen: Arr[Str] = []
+  let cur_name = name
+  let cur_ver = v
+  while true {
+    let i = find(r, cur_name, cur_ver)
+    if i < 0 {
+      return out
+    }
+    let key = cur_name + "@" + ver.to_str(cur_ver)
+    if contains_str(seen, key) {
+      return out
+    }
+    seen = arr_push(seen, key)
+    out = arr_push(out, r.entries[i])
+    let p = r.entries[i].man.prov
+    if not lin.has_parent(p) {
+      return out
+    }
+    let pv = ver.parse(p.parent_version)
+    if not pv.ok {
+      return out
+    }
+    cur_name = p.parent_name
+    cur_ver = pv
+  }
+  out
+}
+
+# Every entry naming this one as its parent.
+#
+# The question "what else came off this model" is the one that matters when a
+# model turns out to have been trained on bad data, because the answer is the
+# list of things that also have to be pulled.
+fn children(r: Registry, name: Str, v: ver.Version) -> Arr[Entry] {
+  let out: Arr[Entry] = []
+  let want = ver.to_str(v)
+  let i: I64 = 0
+  while i < len(r.entries) {
+    let p = r.entries[i].man.prov
+    if p.parent_name == name and p.parent_version == want {
+      out = arr_push(out, r.entries[i])
+    }
+    i = i + 1
+  }
+  out
+}
+
+# Parent links that name a digest disagreeing with the parent's own.
+#
+# A parent retrained and republished under the same version is exactly what the
+# immutability rule in `register` prevents, so a hit here means the index was
+# edited by hand or the parent came from another registry. Either is worth a
+# message.
+fn broken_links(r: Registry) -> Arr[Str] {
+  let out: Arr[Str] = []
+  let i: I64 = 0
+  while i < len(r.entries) {
+    let e = r.entries[i]
+    let p = e.man.prov
+    if lin.has_parent(p) and len(p.parent_digest) > 0 {
+      let pv = ver.parse(p.parent_version)
+      if pv.ok {
+        let j = find(r, p.parent_name, pv)
+        if j >= 0 and r.entries[j].digest != p.parent_digest {
+          out = arr_push(out, mf.ref_str(e.man) + " names parent "
+            + mf.ref_str(r.entries[j].man)
+            + " with a digest that is not the parent's")
+        }
+      }
+    }
+    i = i + 1
+  }
+  out
+}
+
+# ---- auditing --------------------------------------------------------------
+
+# Check every entry against the archive it points at.
+#
+# This is what the second copy of the digest buys, and it is the function that
+# turns the registry from a cache into a check. Returns one message per problem
+# and an empty array when everything agrees.
+fn audit(r: Registry) -> Arr[Str] {
+  let out: Arr[Str] = []
+  let i: I64 = 0
+  while i < len(r.entries) {
+    let e = r.entries[i]
+    let integ = arc.verify(e.path)
+    if integ.status == arc.INTEGRITY_UNREADABLE {
+      out = arr_push(out, mf.ref_str(e.man) + ": " + integ.detail)
+    }
+    if integ.status == arc.INTEGRITY_ABSENT {
+      out = arr_push(out, mf.ref_str(e.man) + ": the archive declares no digest")
+    }
+    if integ.status == arc.INTEGRITY_MISMATCH {
+      out = arr_push(out, mf.ref_str(e.man) + ": " + integ.detail)
+    }
+    if integ.status == arc.INTEGRITY_OK and integ.computed != e.digest {
+      out = arr_push(out, mf.ref_str(e.man)
+        + ": the archive is internally consistent and does not match the digest"
+        + " recorded when it was registered, so the file was replaced")
+    }
+    i = i + 1
+  }
+  let links = broken_links(r)
+  let j: I64 = 0
+  while j < len(links) {
+    out = arr_push(out, links[j])
+    j = j + 1
+  }
+  out
+}
+
+# ---- the index file --------------------------------------------------------
+
+fn to_json(r: Registry) -> Json {
+  let root = json.object()
+  json.set_field(root, "index_format", json.number(f64(INDEX_FORMAT)))
+  let items = json.array()
+  let i: I64 = 0
+  while i < len(r.entries) {
+    let e = r.entries[i]
+    let o = json.object()
+    json.set_field(o, "path", json.string(e.path))
+    json.set_field(o, "digest", json.string(e.digest))
+    json.set_field(o, "stage", json.string(e.stage))
+    json.set_field(o, "manifest", card.to_json(e.man))
+    json.push_item(items, o)
+    i = i + 1
+  }
+  json.set_field(root, "models", items)
+  root
+}
+
+fn save_index(r: Registry) -> Str {
+  write_text_or(r.path, json.render_indent(to_json(r), 2))
+}
+
+# Read an index. A missing file is an empty registry rather than an error: the
+# first `register` of a new registry should not need an `init` step, and a
+# registry with no models is a real state.
+#
+# A newer index format is refused, by the same rule and for the same reason as
+# the archive format at src/archive.tw.
+fn load_index(path: Str) -> Registry {
+  let r = empty(path)
+  let raw = read_text_or(path, "")
+  if len(raw) == 0 {
+    return r
+  }
+  match json.parse(raw) {
+    Err(e) => {
+      r.err = path + " is not valid JSON: " + e.msg
+      r
+    },
+    Ok(doc) => read_index(r, doc),
+  }
+}
+
+fn read_index(r: Registry, doc: Json) -> Registry {
+  let fmt = i64(card.num_field(doc, "index_format"))
+  if fmt > INDEX_FORMAT {
+    r.err = r.path + " is index format " + str(fmt)
+      + " and this build of selvedge reads up to " + str(INDEX_FORMAT)
+      + ": upgrade selvedge to read it"
+    return r
+  }
+  match json.field(doc, "models") {
+    None => r,
+    Some(v) => match json.as_array(v) {
+      None => r,
+      Some(items) => read_entries(r, items),
+    },
+  }
+}
+
+fn read_entries(r: Registry, items: Arr[Json]) -> Registry {
+  let i: I64 = 0
+  while i < len(items) {
+    let o = items[i]
+    let parsed = card.parse_doc(card.obj_field(o, "manifest"))
+    if len(parsed.err) > 0 {
+      r.err = r.path + " entry " + str(i) + ": " + parsed.err
+      return r
+    }
+    let man = parsed.man
+    man.digest = card.str_field(o, "digest")
+    r.entries = arr_push(r.entries, Entry {
+      man: man,
+      path: card.str_field(o, "path"),
+      digest: card.str_field(o, "digest"),
+      stage: card.str_field(o, "stage"),
+    })
+    i = i + 1
+  }
+  r
+}

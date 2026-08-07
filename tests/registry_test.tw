@@ -1,0 +1,189 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/registry.tw" as reg
+import "../src/manifest.tw" as mf
+import "../src/version.tw" as ver
+import "../src/lineage.tw" as lin
+
+fn a_model(name: Str, v: Str, digest: Str) -> mf.Manifest {
+  let m = mf.manifest(name, ver.parse(v), "mlp", mf.signature([-1, 4], [-1, 3], "logits"))
+  m.digest = digest
+  m
+}
+
+fn stocked() -> reg.Registry {
+  let r = reg.empty("tmp_index.json")
+  reg.register(r, a_model("blobs", "1.0.0", "aaaa"), "models/blobs-1.0.0.slv", "")
+  reg.register(r, a_model("blobs", "1.2.0", "bbbb"), "models/blobs-1.2.0.slv", "production")
+  reg.register(r, a_model("blobs", "1.10.0", "cccc"), "models/blobs-1.10.0.slv", "")
+  reg.register(r, a_model("prices", "0.4.1", "dddd"), "models/prices-0.4.1.slv", "")
+  r
+}
+
+fn registering_needs_a_digest() {
+  let r = reg.empty("tmp_index.json")
+  let m = a_model("blobs", "1.0.0", "")
+  t.check("an undigested model is refused",
+    len(reg.register(r, m, "models/blobs.slv", "")) > 0)
+}
+
+fn a_registered_version_does_not_change() {
+  # The property everything else depends on. If an entry can be replaced, a
+  # lineage chain stops being a record of what happened and becomes a claim
+  # about what the file says today.
+  let r = stocked()
+  let again = reg.register(r, a_model("blobs", "1.2.0", "eeee"), "elsewhere.slv", "")
+  t.check("re-registering is refused", len(again) > 0)
+  t.equal_i64("and nothing was added", len(r.entries), 4)
+}
+
+fn a_changed_contract_within_a_major_is_refused() {
+  # The rule that makes a caret constraint safe to write. Without it, ^1.0.0
+  # can resolve to a model that takes a different input shape, and the failure
+  # arrives as a shape error in production rather than a message at publish.
+  let r = stocked()
+  let m = a_model("blobs", "1.3.0", "ffff")
+  m.sig = mf.signature([-1, 8], [-1, 3], "logits")
+  let err = reg.register(r, m, "models/blobs-1.3.0.slv", "")
+  t.check("it is refused", len(err) > 0)
+
+  let m2 = a_model("blobs", "2.0.0", "ffff")
+  m2.sig = mf.signature([-1, 8], [-1, 3], "logits")
+  t.equal_str("and a new major carries the new contract fine",
+    reg.register(r, m2, "models/blobs-2.0.0.slv", ""), "")
+}
+
+fn listing_gives_each_name_once_in_the_order_added() {
+  let ns = reg.names(stocked())
+  t.equal_i64("two names", len(ns), 2)
+  t.equal_str("first registered first", ns[0], "blobs")
+  t.equal_str("then the second", ns[1], "prices")
+}
+
+fn versions_come_back_ascending_and_not_lexically() {
+  let vs = reg.versions(stocked(), "blobs")
+  t.equal_i64("three versions", len(vs), 3)
+  t.equal_str("lowest first", ver.to_str(vs[0]), "1.0.0")
+  t.equal_str("then", ver.to_str(vs[1]), "1.2.0")
+  t.equal_str("and 1.10.0 sorts above 1.2.0", ver.to_str(vs[2]), "1.10.0")
+}
+
+fn a_caret_resolves_to_the_highest_match() {
+  let got = reg.resolve(stocked(), "blobs", "^1.0.0")
+  t.check("found", got.found)
+  t.equal_str("the highest 1.x", ver.to_str(got.entry.man.version), "1.10.0")
+}
+
+fn an_exact_constraint_resolves_to_that_version() {
+  let got = reg.resolve(stocked(), "blobs", "1.2.0")
+  t.check("found", got.found)
+  t.equal_str("exactly it", ver.to_str(got.entry.man.version), "1.2.0")
+  t.equal_str("with its path", got.entry.path, "models/blobs-1.2.0.slv")
+}
+
+fn an_unsatisfiable_constraint_says_what_does_exist() {
+  # An error that ends the investigation rather than starting one.
+  let got = reg.resolve(stocked(), "blobs", "^3.0.0")
+  t.check("not found", not got.found)
+  t.check("and the message lists the registered versions", len(got.err) > 20)
+}
+
+fn an_unknown_name_is_a_different_message_from_an_unmatched_constraint() {
+  let got = reg.resolve(stocked(), "nothing", "*")
+  t.check("not found", not got.found)
+  t.check("the message names the model", len(got.err) > 0)
+}
+
+fn a_stage_resolves_only_when_exactly_one_entry_carries_it() {
+  let r = stocked()
+  let got = reg.resolve_stage(r, "blobs", "production")
+  t.check("found", got.found)
+  t.equal_str("the labelled one", ver.to_str(got.entry.man.version), "1.2.0")
+
+  reg.set_stage(r, "blobs", ver.parse("1.10.0"), "production")
+  let ambiguous = reg.resolve_stage(r, "blobs", "production")
+  t.check("two labels is not an answer", not ambiguous.found)
+  t.check("and it says so rather than picking one", len(ambiguous.err) > 0)
+}
+
+fn lineage_walks_back_through_the_registry() {
+  let r = reg.empty("tmp_index.json")
+  let base = a_model("blobs", "1.0.0", "aaaa")
+  reg.register(r, base, "models/blobs-1.0.0.slv", "")
+
+  let tuned = a_model("blobs", "1.1.0", "bbbb")
+  lin.set_parent(tuned.prov, "blobs", "1.0.0", "aaaa")
+  reg.register(r, tuned, "models/blobs-1.1.0.slv", "")
+
+  let tuned2 = a_model("blobs", "1.2.0", "cccc")
+  lin.set_parent(tuned2.prov, "blobs", "1.1.0", "bbbb")
+  reg.register(r, tuned2, "models/blobs-1.2.0.slv", "")
+
+  let chain = reg.ancestry(r, "blobs", ver.parse("1.2.0"))
+  t.equal_i64("three deep", len(chain), 3)
+  t.equal_str("starting at the model asked about",
+    ver.to_str(chain[0].man.version), "1.2.0")
+  t.equal_str("and ending at the root", ver.to_str(chain[2].man.version), "1.0.0")
+
+  let kids = reg.children(r, "blobs", ver.parse("1.0.0"))
+  t.equal_i64("the root has one child", len(kids), 1)
+  t.equal_str("and it is 1.1.0", ver.to_str(kids[0].man.version), "1.1.0")
+}
+
+fn a_lineage_cycle_terminates_rather_than_hanging() {
+  # Lineage is caller-supplied strings, so a cycle is reachable by typing.
+  let r = reg.empty("tmp_index.json")
+  let a = a_model("blobs", "1.0.0", "aaaa")
+  lin.set_parent(a.prov, "blobs", "1.1.0", "bbbb")
+  reg.register(r, a, "a.slv", "")
+  let x = a_model("blobs", "1.1.0", "bbbb")
+  lin.set_parent(x.prov, "blobs", "1.0.0", "aaaa")
+  reg.register(r, x, "x.slv", "")
+  let chain = reg.ancestry(r, "blobs", ver.parse("1.0.0"))
+  t.equal_i64("the walk stops at the repeat", len(chain), 2)
+}
+
+fn a_parent_digest_that_disagrees_with_the_parent_is_reported() {
+  let r = reg.empty("tmp_index.json")
+  reg.register(r, a_model("blobs", "1.0.0", "aaaa"), "a.slv", "")
+  let child = a_model("blobs", "1.1.0", "bbbb")
+  lin.set_parent(child.prov, "blobs", "1.0.0", "not-the-parents-digest")
+  reg.register(r, child, "b.slv", "")
+  t.equal_i64("one broken link", len(reg.broken_links(r)), 1)
+}
+
+fn an_index_round_trips_through_json() {
+  let r = stocked()
+  t.equal_str("the index writes", reg.save_index(r), "")
+  let back = reg.load_index("tmp_index.json")
+  t.equal_str("and reads without error", back.err, "")
+  t.equal_i64("with every entry", len(back.entries), 4)
+  let got = reg.resolve(back, "blobs", "^1.0.0")
+  t.check("and resolution still works", got.found)
+  t.equal_str("on the same answer", ver.to_str(got.entry.man.version), "1.10.0")
+  t.equal_str("with the digest preserved", got.entry.digest, "cccc")
+}
+
+fn a_missing_index_is_an_empty_registry_and_not_an_error() {
+  let r = reg.load_index("tmp_index_that_does_not_exist.json")
+  t.equal_str("no error", r.err, "")
+  t.equal_i64("no entries", len(r.entries), 0)
+}
+
+registering_needs_a_digest()
+a_registered_version_does_not_change()
+a_changed_contract_within_a_major_is_refused()
+listing_gives_each_name_once_in_the_order_added()
+versions_come_back_ascending_and_not_lexically()
+a_caret_resolves_to_the_highest_match()
+an_exact_constraint_resolves_to_that_version()
+an_unsatisfiable_constraint_says_what_does_exist()
+an_unknown_name_is_a_different_message_from_an_unmatched_constraint()
+a_stage_resolves_only_when_exactly_one_entry_carries_it()
+lineage_walks_back_through_the_registry()
+a_lineage_cycle_terminates_rather_than_hanging()
+a_parent_digest_that_disagrees_with_the_parent_is_reported()
+an_index_round_trips_through_json()
+a_missing_index_is_an_empty_registry_and_not_an_error()
+t.report("registry")

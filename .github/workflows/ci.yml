@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# selvedge cannot be run yet: it is written in twill's systems subset, which is
+# still being implemented. So CI gates on what is checkable today and says
+# plainly that it is not checking behaviour. When `mode systems` lands, the gate
+# becomes `twill run tests/*.tw` and these checks stay.
+#
+# The forbidden strings are assembled at runtime rather than written out, so
+# that this workflow does not fail its own checks.
+jobs:
+  source-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every source file is twill
+        run: |
+          stray=$(find . -path ./.git -prune -o -type f \
+            ! -name '*.tw' ! -name '*.md' ! -name '*.yml' ! -name '*.toml' \
+            ! -name 'LICENSE' ! -name '.gitignore' -print)
+          if [ -n "$stray" ]; then
+            echo "selvedge is written in twill; these files are neither .tw nor documentation:"
+            echo "$stray"
+            exit 1
+          fi
+
+      - name: No reference to the old language name
+        run: |
+          old=$(printf 'ras'; printf 'ter')
+          if grep -rni "$old" --include='*.tw' --include='*.md' --include='*.toml' .; then
+            echo "the language is twill"
+            exit 1
+          fi
+
+      - name: No file carries the old source extension
+        run: |
+          old=$(printf '*.r'; printf 'a')
+          if find . -name "$old" | grep .; then
+            echo "twill source is .tw"
+            exit 1
+          fi
+          if grep -rn "$(printf '\\.r'; printf 'a\\b')" --include='*.tw' --include='*.md' .; then
+            echo "twill source is .tw"
+            exit 1
+          fi
+
+      - name: No em dashes
+        run: |
+          dash=$(printf '\xe2\x80\x94')
+          if grep -rn "$dash" --include='*.tw' --include='*.md' --include='*.toml' .; then
+            echo "em dashes are not used in this repository"
+            exit 1
+          fi
+
+      - name: Every twill source declares its mode
+        run: |
+          for f in $(find . -name '*.tw'); do
+            if [ "$(head -n 1 "$f")" != "mode systems" ]; then
+              echo "$f does not start with 'mode systems'"
+              exit 1
+            fi
+          done
+
+      - name: The README does not claim selvedge works
+        run: |
+          grep -q 'selvedge does not run yet' README.md || {
+            echo "README.md must state that selvedge does not run yet"
+            exit 1
+          }
+
+      - name: Every needs entry names a file
+        run: |
+          # A needs entry without a file to look at is a wish, not a work item.
+          missing=$(grep -c '^### ' docs/needs.md)
+          named=$(grep -c '^\*\*\(Used by\|Would improve\|Needs\)' docs/needs.md)
+          if [ "$named" -lt "$missing" ]; then
+            echo "docs/needs.md has $missing entries and only $named name a file"
+            exit 1
+          fi
+
+  format-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The four magic bytes are a compatibility contract with every file a user
+      # has already saved. This job exists so that changing them requires
+      # deleting a CI check, which is a thing someone has to justify in a diff,
+      # rather than editing a constant.
+      - name: The save magic is the four bytes it has always been
+        run: |
+          for pair in "MAGIC_R: I64 = 82" "MAGIC_S: I64 = 83" "MAGIC_T: I64 = 84"; do
+            grep -q "$pair" src/rstr.tw || {
+              echo "src/rstr.tw no longer declares '$pair'"
+              echo "the save magic is a format contract; see the comment at the top of that file"
+              exit 1
+            }
+          done
+          grep -q 'let SAVE_VERSION: I64 = 1' src/rstr.tw || {
+            echo "src/rstr.tw no longer writes save-file version 1"
+            exit 1
+          }
+
+      - name: The reference byte layout is asserted by a test
+        run: |
+          grep -q 'a_record_encodes_to_exactly_these_bytes' tests/rstr_test.tw || {
+            echo "tests/rstr_test.tw must assert the encoding byte for byte"
+            exit 1
+          }
+
+      # A format that gains versioning later has already broken. This check
+      # makes removing the version refusal a visible act.
+      - name: A newer archive format is refused
+        run: |
+          grep -q 'this build of selvedge reads up to format' src/archive.tw || {
+            echo "src/archive.tw must refuse an archive from a newer format by name"
+            exit 1
+          }
+          grep -q 'let FORMAT: I64 = ' src/archive.tw || {
+            echo "src/archive.tw must declare the archive format version"
+            exit 1
+          }
+
+      - name: The compatibility rule is written down
+        run: |
+          grep -q 'compatibility rule' docs/format.md || {
+            echo "docs/format.md must state the compatibility rule"
+            exit 1
+          }
+
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Checkpoints are loom's. Archives are selvedge's. The boundary is a
+      # design decision that erodes quietly, so it is checked rather than
+      # remembered.
+      - name: selvedge does not reimplement loom's checkpoint
+        run: |
+          # Code only. The comment at the top of src/archive.tw names these
+          # fields on purpose, to say which side of the boundary they are on.
+          if grep -rnE '^[^#]*\b(opt_m|opt_v|opt_t|patience|global_step)\b' --include='*.tw' src/; then
+            echo "these are optimiser and run state, which belong in a loom checkpoint"
+            echo "an archive ships a finished model; see the top of src/archive.tw"
+            exit 1
+          fi
+
+      - name: The boundary is stated in the README and in the source
+        run: |
+          grep -q 'An archive is not a checkpoint' README.md || {
+            echo "README.md must state the boundary with loom's checkpoint"
+            exit 1
+          }
+          grep -q "the boundary with loom's checkpoint" src/archive.tw || {
+            echo "src/archive.tw must state the boundary in a comment"
+            exit 1
+          }

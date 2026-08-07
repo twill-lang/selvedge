@@ -1,0 +1,125 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/lineage.tw" as lin
+
+fn full() -> lin.Lineage {
+  let l = lin.from_data("data/train.csv",
+    "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", 4096)
+  lin.set_code(l, "github.com/example/pipeline",
+    "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b", false)
+  lin.set_hyper(l, "seed", "20260807")
+  lin.set_hyper(l, "lr", "0.003")
+  lin.set_hyper(l, "optimiser", "adam")
+  l
+}
+
+fn a_complete_lineage_is_reproducible() {
+  t.check("every identifying field is present", lin.is_reproducible(full()))
+  t.equal_i64("and nothing is reported missing", len(lin.gaps(full())), 0)
+}
+
+fn a_missing_data_digest_makes_it_unreproducible() {
+  let l = full()
+  l.data_digest = ""
+  t.check("not reproducible", not lin.is_reproducible(l))
+  t.check("and the gap is reported", len(lin.gaps(l)) > 0)
+}
+
+fn a_dirty_tree_makes_it_unreproducible_and_is_still_recorded() {
+  let l = full()
+  lin.set_code(l, "github.com/example/pipeline",
+    "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b", true)
+  t.check("not reproducible", not lin.is_reproducible(l))
+  t.check("the commit is still there to look at", len(l.code_commit) > 0)
+}
+
+fn a_missing_seed_is_a_gap_without_being_fatal() {
+  # A run without a recorded seed repeats closely and not exactly. That is
+  # worth saying and is not the same as being unrepeatable, so it is a gap and
+  # not a reproducibility failure.
+  let l = full()
+  l.hp_names = []
+  l.hp_values = []
+  lin.set_hyper(l, "lr", "0.003")
+  t.check("still reproducible", lin.is_reproducible(l))
+  t.check("and the seed is reported as a gap", len(lin.gaps(l)) > 0)
+}
+
+fn a_hyperparameter_set_twice_is_replaced_and_not_duplicated() {
+  let l = full()
+  lin.set_hyper(l, "lr", "0.001")
+  t.equal_str("the new value wins", lin.hyper(l, "lr"), "0.001")
+  let count: I64 = 0
+  let i: I64 = 0
+  while i < len(l.hp_names) {
+    if l.hp_names[i] == "lr" {
+      count = count + 1
+    }
+    i = i + 1
+  }
+  t.equal_i64("and there is one of it", count, 1)
+}
+
+fn the_digest_covers_identifying_fields_and_ignores_prose() {
+  let a = full()
+  let x = full()
+  x.note = "a completely different note"
+  x.data_source = "somewhere else entirely"
+  x.trained_at = "last tuesday"
+  t.equal_str("rewording does not change the lineage digest",
+    lin.digest(a), lin.digest(x))
+}
+
+fn the_digest_changes_when_an_identifying_field_changes() {
+  let a = full()
+  let x = full()
+  lin.set_hyper(x, "lr", "0.03")
+  t.check("a changed hyperparameter changes the digest", lin.digest(a) != lin.digest(x))
+
+  let y = full()
+  y.data_rows = 4095
+  t.check("a changed row count changes the digest", lin.digest(a) != lin.digest(y))
+}
+
+fn diff_names_the_fields_that_moved() {
+  let a = full()
+  let x = full()
+  lin.set_hyper(x, "lr", "0.03")
+  x.code_commit = "0000000000000000000000000000000000000000"
+  let d = lin.diff(a, x)
+  t.equal_i64("two fields differ", len(d), 2)
+  t.check("the commit is named", d[0] == "commit" or d[1] == "commit")
+  t.check("the learning rate is named", d[0] == "lr" or d[1] == "lr")
+}
+
+fn diff_notices_a_hyperparameter_that_was_dropped() {
+  # The loop over a's names cannot see a name only x has, which is the bug this
+  # test exists for: a dropped hyperparameter is as much a difference as a
+  # changed one.
+  let a = full()
+  let x = full()
+  lin.set_hyper(x, "weight_decay", "0.01")
+  let d = lin.diff(a, x)
+  t.equal_i64("one field differs", len(d), 1)
+  t.equal_str("and it is the one only x has", d[0], "weight_decay")
+}
+
+fn a_parent_without_a_digest_is_a_link_that_cannot_be_checked() {
+  let l = full()
+  lin.set_parent(l, "classifier", "1.0.0", "")
+  t.check("having a parent is recorded", lin.has_parent(l))
+  t.check("and the unverifiable link is a gap", len(lin.gaps(l)) > 0)
+}
+
+a_complete_lineage_is_reproducible()
+a_missing_data_digest_makes_it_unreproducible()
+a_dirty_tree_makes_it_unreproducible_and_is_still_recorded()
+a_missing_seed_is_a_gap_without_being_fatal()
+a_hyperparameter_set_twice_is_replaced_and_not_duplicated()
+the_digest_covers_identifying_fields_and_ignores_prose()
+the_digest_changes_when_an_identifying_field_changes()
+diff_names_the_fields_that_moved()
+diff_notices_a_hyperparameter_that_was_dropped()
+a_parent_without_a_digest_is_a_link_that_cannot_be_checked()
+t.report("lineage")

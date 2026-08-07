@@ -1,0 +1,134 @@
+mode systems
+
+# Publishing a trained model, end to end.
+#
+# The whole point of this file is the middle of it. Writing the weights is four
+# lines and is the easy part; the rest is the record of what produced them,
+# which is the part that is worth anything six months later and is the part
+# everyone skips.
+#
+# This does not run. selvedge is written in twill's systems subset, which is
+# still being implemented. See docs/needs.md.
+
+import "../src/archive.tw" as arc
+import "../src/manifest.tw" as mf
+import "../src/registry.tw" as reg
+import "../src/lineage.tw" as lin
+import "../src/version.tw" as ver
+import "../src/card.tw" as card
+
+# The parameters. In a real program these come off a training run: loom's
+# `run.params` after `fit`, or the tree you handed to `grad`. selvedge does not
+# care which, and deliberately does not know: it takes a tree.
+let params = load("runs/blobs.params")
+
+# ---- the contract ----------------------------------------------------------
+#
+# What the model takes and what it returns. -1 is the batch axis. "logits" is
+# not decoration: it is the field that stops the next person applying softmax to
+# something that already had it applied.
+let sig = mf.signature([-1, 4], [-1, 3], "logits")
+
+let m = mf.manifest("blobs", ver.parse("1.2.0"), "mlp", sig)
+m.description = "three-class blob classifier"
+m.architecture_detail = "dense 4->16, relu, dense 16->3"
+
+# ---- what it scored --------------------------------------------------------
+#
+# With the dataset it scored on. A metric without a dataset is a number without
+# a unit, so `metrics` takes both and there is no way to record one without the
+# other.
+m.met = mf.metrics("blobs/val.csv", 240)
+mf.record_metric(m.met, "accuracy", 0.9583)
+mf.record_metric(m.met, "loss", 0.1180)
+
+# ---- what produced it ------------------------------------------------------
+#
+# The data by digest, the code by commit, the hyperparameters by name. Every one
+# of these is checkable by someone holding the thing it names, which is what
+# separates lineage from a note saying "trained on the usual data".
+let prov = lin.from_data("blobs/train.csv",
+  lin.data_digest_of_file("blobs/train.csv"), 960)
+lin.set_code(prov, "github.com/example/blobs",
+  "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b", false)
+lin.set_hyper(prov, "seed", "20260807")
+lin.set_hyper(prov, "lr", "0.01")
+lin.set_hyper(prov, "optimiser", "adam")
+lin.set_hyper(prov, "epochs", "60")
+lin.set_hyper(prov, "batch_size", "16")
+
+# Derived from the previous release rather than trained from scratch, so the
+# chain is recorded with the parent's digest. Named without a digest, the link
+# would survive the parent being replaced, which is the case that ruins an
+# investigation.
+lin.set_parent(prov, "blobs", "1.1.0",
+  "3f79bb7b435b05321651daefd374cdc681dc06faa65e374e38337b88ca046dea")
+m.prov = prov
+
+# selvedge will not stop you shipping an incompletely documented model. It will
+# tell you, in specific terms, and let you decide.
+let gaps = lin.gaps(m.prov)
+if len(gaps) > 0 {
+  print("lineage gaps:")
+  let i = 0
+  while i < len(gaps) {
+    print("  " + gaps[i])
+    i = i + 1
+  }
+}
+
+# ---- write it --------------------------------------------------------------
+#
+# `write` writes twice: once to produce the bytes, then it hashes the parameter
+# payload and writes again with the digest filled in. The cost is stated at the
+# function.
+let a = arc.promote(params, m)
+let err = arc.write(a, "models/blobs-1.2.0.slv")
+if len(err) > 0 {
+  print("selvedge: " + err)
+  exit(1)
+}
+
+# The model card, for humans and for anything that is not twill.
+write_text_or("models/blobs-1.2.0.json", card.render_card(a.man))
+
+# ---- register it -----------------------------------------------------------
+
+let r = reg.load_index("models/index.json")
+if len(r.err) > 0 {
+  print("selvedge: " + r.err)
+  exit(1)
+}
+
+# This is where a changed input shape under an unchanged major version is
+# refused, and it is refused rather than warned about.
+let rerr = reg.register(r, a.man, "models/blobs-1.2.0.slv", "candidate")
+if len(rerr) > 0 {
+  print("selvedge: " + rerr)
+  exit(1)
+}
+reg.save_index(r)
+
+# ---- read it back ----------------------------------------------------------
+
+let resolved = reg.resolve(r, "blobs", "^1.0.0")
+if not resolved.found {
+  print("selvedge: " + resolved.err)
+  exit(1)
+}
+
+let integ = arc.verify(resolved.entry.path)
+if not arc.is_intact(integ) {
+  print("selvedge: " + integ.detail)
+  exit(1)
+}
+
+let loaded = arc.read(resolved.entry.path)
+print("resolved blobs ^1.0.0 to " + mf.ref_str(loaded.arc.man))
+print("  accuracy " + str(mf.metric_or(loaded.arc.man.met, "accuracy", 0.0)))
+print("  digest   " + loaded.arc.man.digest)
+
+# What else came off the parent. The question that matters when a model turns
+# out to have been trained on data that was wrong.
+let kids = reg.children(r, "blobs", ver.parse("1.1.0"))
+print("  derived from 1.1.0: " + str(len(kids)) + " model(s)")

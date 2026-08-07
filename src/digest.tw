@@ -1,0 +1,210 @@
+mode systems
+
+# digest.tw: SHA-256, over I64.
+#
+# An archive that carries a content hash and computes it with a
+# non-cryptographic function carries a checksum wearing a hash's name. FNV or a
+# CRC detects a flipped bit on a disk; it does not detect substitution, and
+# substitution is the threat a model registry has. A model file is a program in
+# every sense that matters, and the reason to hash it is so that "the weights I
+# evaluated" and "the weights I deployed" can be shown to be the same weights.
+#
+# ---- this is the second copy in the ecosystem, and that is a bug -----------
+#
+# spool has `src/sha256.tw`. This is not it, and it should be. Neither
+# repository can import the other's: twill resolves a non-`std/` import as a
+# path relative to the importing file, so only `std/` modules are reachable from
+# an installed package, and spool is an application rather than a package.
+#
+# Two SHA-256 implementations in one ecosystem drift, and the drift is invisible
+# until two tools disagree about a hash and neither is obviously wrong. The fix
+# is `std/hash`, at which point this file is deleted. docs/needs.md entry 7.
+# Duplicating it was the lesser of two bad options; the worse one was to
+# reference spool's file across a repository boundary that the import rule
+# cannot express.
+#
+# ---- the cost, stated ------------------------------------------------------
+#
+# This runs the compression function in a tree-walking interpreter, one 32-bit
+# word at a time, on a value type that is 64 bits wide. It will be slow, on the
+# order of a megabyte per second. Hashing a 12 kB parameter tree is nothing;
+# hashing a 400 MB archive at that rate is several minutes and is not
+# acceptable, which is why `docs/needs.md` entry 7 asks for a builtin rather
+# than for `std/hash` alone. selvedge hashes the payload once on write and once
+# on an explicit verify, never on an ordinary load, precisely because of this.
+#
+# Every intermediate is masked back to 32 bits after every step, because I64
+# wraps at 64 bits and SHA-256 wraps at 32.
+
+import "bytes_compat.tw" as b
+
+let MASK32: I64 = 4294967295
+
+fn k_table() -> Arr[I64] {
+  [
+    1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993,
+    2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987,
+    1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774,
+    264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986,
+    2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711,
+    113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291,
+    1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411,
+    3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344,
+    430227734, 506948616, 659060556, 883997877, 958139571, 1322822218,
+    1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424,
+    2428436474, 2756734187, 3204031479, 3329325298,
+  ]
+}
+
+let K: Arr[I64] = k_table()
+
+fn mask(x: I64) -> I64 = and(x, MASK32)
+
+fn rotr(x: I64, n: I64) -> I64 {
+  mask(or(shr(and(x, MASK32), n), shl(x, 32 - n)))
+}
+
+fn shr32(x: I64, n: I64) -> I64 = shr(and(x, MASK32), n)
+
+fn ch(x: I64, y: I64, z: I64) -> I64 {
+  xor(and(x, y), and(and(not(x), z), MASK32))
+}
+
+fn maj(x: I64, y: I64, z: I64) -> I64 {
+  xor(xor(and(x, y), and(x, z)), and(y, z))
+}
+
+fn big_s0(x: I64) -> I64 = xor(xor(rotr(x, 2), rotr(x, 13)), rotr(x, 22))
+
+fn big_s1(x: I64) -> I64 = xor(xor(rotr(x, 6), rotr(x, 11)), rotr(x, 25))
+
+fn small_s0(x: I64) -> I64 = xor(xor(rotr(x, 7), rotr(x, 18)), shr32(x, 3))
+
+fn small_s1(x: I64) -> I64 = xor(xor(rotr(x, 17), rotr(x, 19)), shr32(x, 10))
+
+# The message length after the 0x80 byte, the zero fill and the 8-byte
+# big-endian bit count, rounded up to a whole number of 64-byte blocks.
+fn padded_len(n: I64) -> I64 {
+  let total = n + 9
+  let rem = total - (total / 64) * 64
+  if rem == 0 {
+    return total
+  }
+  total + (64 - rem)
+}
+
+# The padded message's byte at index i, computed rather than materialised.
+# Building the padded copy would double the memory for a large archive and buy
+# nothing: the padding is nine bytes of structure and a length.
+fn byte_at(msg: Str, i: I64, total: I64) -> I64 {
+  let n = len(msg)
+  if i < n {
+    return msg[i]
+  }
+  if i == n {
+    return 128
+  }
+  if i < total - 8 {
+    return 0
+  }
+  let shift = (total - 1 - i) * 8
+  let bits = n * 8
+  and(shr(bits, shift), 255)
+}
+
+struct State {
+  h0: I64, h1: I64, h2: I64, h3: I64,
+  h4: I64, h5: I64, h6: I64, h7: I64,
+}
+
+fn initial() -> State {
+  State {
+    h0: 1779033703, h1: 3144134277, h2: 1013904242, h3: 2773480762,
+    h4: 1359893119, h5: 2600822924, h6: 528734635, h7: 1541459225,
+  }
+}
+
+# The digest of a byte string, as 64 lowercase hex characters.
+fn hash(msg: Str) -> Str {
+  let s = initial()
+  let total = padded_len(len(msg))
+  let w: Arr[I64] = []
+  let i: I64 = 0
+  while i < 64 {
+    w = arr_push(w, 0)
+    i = i + 1
+  }
+
+  let base: I64 = 0
+  while base < total {
+    let t: I64 = 0
+    while t < 16 {
+      let o = base + t * 4
+      w[t] = or(or(shl(byte_at(msg, o, total), 24), shl(byte_at(msg, o + 1, total), 16)),
+                or(shl(byte_at(msg, o + 2, total), 8), byte_at(msg, o + 3, total)))
+      t = t + 1
+    }
+    t = 16
+    while t < 64 {
+      w[t] = mask(small_s1(w[t - 2]) + w[t - 7] + small_s0(w[t - 15]) + w[t - 16])
+      t = t + 1
+    }
+
+    let a = s.h0
+    let bb = s.h1
+    let c = s.h2
+    let d = s.h3
+    let e = s.h4
+    let f = s.h5
+    let g = s.h6
+    let h = s.h7
+
+    t = 0
+    while t < 64 {
+      let t1 = mask(h + big_s1(e) + ch(e, f, g) + K[t] + w[t])
+      let t2 = mask(big_s0(a) + maj(a, bb, c))
+      h = g
+      g = f
+      f = e
+      e = mask(d + t1)
+      d = c
+      c = bb
+      bb = a
+      a = mask(t1 + t2)
+      t = t + 1
+    }
+
+    s.h0 = mask(s.h0 + a)
+    s.h1 = mask(s.h1 + bb)
+    s.h2 = mask(s.h2 + c)
+    s.h3 = mask(s.h3 + d)
+    s.h4 = mask(s.h4 + e)
+    s.h5 = mask(s.h5 + f)
+    s.h6 = mask(s.h6 + g)
+    s.h7 = mask(s.h7 + h)
+    base = base + 64
+  }
+
+  let out = b.new()
+  push_word(out, s.h0)
+  push_word(out, s.h1)
+  push_word(out, s.h2)
+  push_word(out, s.h3)
+  push_word(out, s.h4)
+  push_word(out, s.h5)
+  push_word(out, s.h6)
+  push_word(out, s.h7)
+  b.to_str(out)
+}
+
+fn push_word(out: Bytes, v: I64) {
+  b.push_hex_byte(out, and(shr(v, 24), 255))
+  b.push_hex_byte(out, and(shr(v, 16), 255))
+  b.push_hex_byte(out, and(shr(v, 8), 255))
+  b.push_hex_byte(out, and(v, 255))
+}
+
+# The first `n` hex characters of a digest, for display. Never for comparison:
+# a registry that matched on a prefix would be a registry with a collision
+# surface it chose for itself.
+fn short(d: Str, n: I64) -> Str = b.slice(d, 0, n)

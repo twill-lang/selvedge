@@ -1,0 +1,76 @@
+mode systems
+
+# SHA-256 against the published vectors.
+#
+# The vectors are from FIPS 180-4 and RFC 6234. They are here rather than
+# alongside a round-trip test because a hash that round-trips against itself
+# proves only that it is deterministic, and a deterministic wrong hash is the
+# failure this file is written to catch: it would make every archive selvedge
+# wrote verify against every archive selvedge wrote, and none against anything
+# else.
+#
+# The multi-block case is not decoration. A compression function with a wrong
+# message schedule is often correct for one block and wrong for two.
+
+import "harness.tw" as t
+import "../src/digest.tw" as dg
+
+fn the_empty_string_hashes_to_the_published_value() {
+  t.equal_str("sha256 of the empty string", dg.hash(""),
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+}
+
+fn abc_hashes_to_the_published_value() {
+  t.equal_str("sha256 of abc", dg.hash("abc"),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+}
+
+fn the_fifty_six_byte_vector_hashes_to_the_published_value() {
+  # 56 bytes, which is the length that forces the padding into a second block
+  # while the message itself fits in one. The off-by-one that treats 55 and 56
+  # the same lands here.
+  t.equal_str("sha256 of the two-block vector",
+    dg.hash("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
+}
+
+fn the_hundred_and_twelve_byte_vector_hashes_to_the_published_value() {
+  t.equal_str("sha256 of the long vector",
+    dg.hash("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"),
+    "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1")
+}
+
+fn a_digest_is_sixty_four_lowercase_hex_characters() {
+  let d = dg.hash("anything")
+  t.equal_i64("length", len(d), 64)
+  let i: I64 = 0
+  let bad: I64 = 0
+  while i < len(d) {
+    let c = d[i]
+    let is_digit = c >= 48 and c <= 57
+    let is_lower_hex = c >= 97 and c <= 102
+    if not is_digit and not is_lower_hex {
+      bad = bad + 1
+    }
+    i = i + 1
+  }
+  t.equal_i64("every character is a lowercase hex digit", bad, 0)
+}
+
+fn one_flipped_byte_changes_the_digest() {
+  t.check("a single byte matters", dg.hash("selvedge") != dg.hash("selvedgf"))
+}
+
+fn short_truncates_and_does_not_reformat() {
+  let d = dg.hash("abc")
+  t.equal_str("the first twelve", dg.short(d, 12), "ba7816bf8f01")
+}
+
+the_empty_string_hashes_to_the_published_value()
+abc_hashes_to_the_published_value()
+the_fifty_six_byte_vector_hashes_to_the_published_value()
+the_hundred_and_twelve_byte_vector_hashes_to_the_published_value()
+a_digest_is_sixty_four_lowercase_hex_characters()
+one_flipped_byte_changes_the_digest()
+short_truncates_and_does_not_reformat()
+t.report("digest")
