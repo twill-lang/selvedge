@@ -174,7 +174,25 @@ fn read_i64(r: Reader) -> I64 {
 # distinction between a signalling and a quiet NaN, and the whole reason the
 # format stores bit patterns is that a saved model reloads bit for bit.
 fn read_f64(r: Reader) -> F64 {
-  f64_from_bits(read_i64(r))
+  let lo: I64 = read_u32(r)
+  let hi: I64 = read_u32(r)
+  f64_from_halves(hi, lo)
+}
+
+# read_i32 sign-extends, which is right for a count and wrong for half of a bit
+# pattern, so the halves are read unsigned.
+fn read_u32(r: Reader) -> I64 {
+  if not need(r, 4) {
+    return 0
+  }
+  let v: I64 = 0
+  let i: I64 = 0
+  while i < 4 {
+    v = or(v, shl(r.src[r.pos + i], i * 8))
+    i = i + 1
+  }
+  r.pos = r.pos + 4
+  v
 }
 
 fn read_bytes(r: Reader, n: I64) -> Str {
@@ -434,8 +452,15 @@ fn put_i64(out: Bytes, v: I64) {
   }
 }
 
+# An f64 goes out as its two 32-bit halves, low half first, which is the same
+# eight little-endian bytes `put_i64(f64_bits(x))` meant to write. It is written
+# this way because the whole 64-bit pattern does not survive a trip through an
+# f64-backed I64 -- `f64_bits(0.1)` comes back 102 short -- and a format whose
+# entire promise is that a saved model reloads bit for bit cannot afford that.
+# Each half is under 2^32 and so is exact. See twill NEEDS-2.
 fn put_f64(out: Bytes, x: F64) {
-  put_i64(out, f64_bits(x))
+  put_i32(out, f64_bits_lo(x))
+  put_i32(out, f64_bits_hi(x))
 }
 
 fn put_str(out: Bytes, s: Str) {

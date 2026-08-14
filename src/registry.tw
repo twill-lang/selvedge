@@ -455,8 +455,14 @@ fn to_json(r: Registry) -> Json {
   root
 }
 
+# "" on success, a message on failure, which is the shape every caller here
+# expects of a fallible step. `write_text_or` reports whether the write happened
+# and this turns that into the message.
 fn save_index(r: Registry) -> Str {
-  write_text_or(r.path, json.render_indent(to_json(r), 2))
+  if write_text_or(r.path, json.render_indent(to_json(r), 2)) {
+    return ""
+  }
+  "cannot write the registry index at " + r.path
 }
 
 # Read an index. A missing file is an empty registry rather than an error: the
