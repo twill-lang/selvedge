@@ -516,5 +516,5 @@ fn ushr(x: I64, k: I64) -> I64 {
   if x >= 0 {
     return shr(x, k)
   }
-  or(shr(and(x, not(shl(1, 63))), k), shl(1, 63 - k))
+  or(shr(and(x, bnot(shl(1, 63))), k), shl(1, 63 - k))
 }
