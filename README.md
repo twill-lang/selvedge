@@ -1,11 +1,11 @@
 <p align="center">
-  <img alt="twill" src="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-mark.png" width="120">
+  <img alt="twill" src="https://raw.githubusercontent.com/twill-lang/twill/main/assets/twill-mark.png" width="120">
 </p>
 
 <h1 align="center">selvedge</h1>
 
 <p align="center">
-  <b>Model serialisation and the model registry for <a href="https://github.com/martin-k-m/twill">twill</a>.</b><br>
+  <b>Model serialisation and the model registry for <a href="https://github.com/twill-lang/twill">twill</a>.</b><br>
   Written in twill.
 </p>
 
@@ -64,7 +64,7 @@ backwards and forwards.
 ## An archive is not a checkpoint
 
 This is the boundary worth stating first, because selvedge sits next to
-[loom](https://github.com/martin-k-m/loom) and loom's `src/checkpoint.tw` also
+[loom](https://github.com/twill-lang/loom) and loom's `src/checkpoint.tw` also
 writes a parameter tree to a file. They are different things and selvedge does
 not duplicate, replace or read loom's.
 
@@ -284,7 +284,7 @@ about what the files say today.
 Once spool and `mode systems` both work:
 
 ```
-spool add selvedge https://github.com/martin-k-m/selvedge
+spool add selvedge https://github.com/twill-lang/selvedge
 ```
 
 spool vendors into `twill_modules/`, and twill's import is a path, so the import
