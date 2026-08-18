@@ -6,7 +6,8 @@ mode systems
 # calls these and `report` exits non-zero if anything failed. Primitive, and
 # enough to be a CI gate the day `mode systems` runs.
 #
-# This mirrors loom's and spool's tests/harness.tw deliberately, line for line.
+# This mirrors loom's and spool's tests/harness.tw deliberately, line for line,
+# down to `tmp` and `cleanup` below, which are the one part not yet copied back.
 # Two conventions for the same job across one ecosystem is one too many. It is
 # also the third copy of this file, and docs/needs.md asks for the test runner
 # that would delete all three.
@@ -63,7 +64,57 @@ fn near(name: Str, got: F64, want: F64, tol: F64) {
   }
 }
 
+# ---- scratch files ---------------------------------------------------------
+#
+# Tests that write files used to write them next to the source, under names
+# beginning with `tmp_`, because there was nowhere else to put them and no way
+# to remove them afterwards. Seven of those files ended up committed to the
+# repository, which is what happens to litter nobody can sweep up: they look
+# like fixtures, so the next person leaves them alone.
+#
+# `temp_dir` and `remove_all` are what fix it. The directory is created on first
+# use, so a suite that writes nothing creates nothing, and `report` removes it,
+# so it is cleaned up on the failure path as well as the success one.
+
+struct Scratch {
+  dir: Str,
+  made: Bool,
+}
+
+let SCRATCH = Scratch { dir: "", made: false }
+
+# A path inside this run's scratch directory. Two calls with the same name give
+# the same path, which is what a test that writes a file and then reads it back
+# wants.
+fn tmp(name: Str) -> Str {
+  if not SCRATCH.made {
+    SCRATCH.dir = match temp_dir("selvedge-test") {
+      Ok(d) => d,
+      # An abort and not a Res. A suite that cannot create a scratch directory
+      # cannot run, and there is no caller who could do anything about it.
+      Err(e) => abort("cannot create a scratch directory for the tests: " + e),
+    }
+    SCRATCH.made = true
+  }
+  path_join(SCRATCH.dir, name)
+}
+
+fn cleanup() {
+  if SCRATCH.made {
+    match remove_all(SCRATCH.dir) {
+      Ok(_) => unit,
+      # Reported and not fatal: the tests' verdict is about the code under test,
+      # and a scratch directory that outlived the run should not turn a passing
+      # suite red. It should be visible, hence the line.
+      Err(e) => print("warning: could not remove " + SCRATCH.dir + ": " + e),
+    }
+    SCRATCH.made = false
+  }
+}
+
 fn report(suite: Str) {
+  # Before the exit, so a failing suite cleans up too.
+  cleanup()
   print(suite + ": " + str(TESTS.passed) + " passed, " + str(TESTS.failed) + " failed")
   if TESTS.failed > 0 {
     exit(1)

@@ -78,6 +78,61 @@ let TAG_STR: I64 = 83
 let TAG_UNIT: I64 = 85
 let TAG_MODEL: I64 = 71
 
+# THESE NUMBERS ARE THE FILE FORMAT. The constants above stay exactly as they
+# were and remain the only place the wire values are written down; the enum
+# below sits beside them, not instead of them, and is converted to and from a
+# byte at the two boundaries -- `tag_of` where a byte comes off the disk, and
+# `byte_of` where one goes onto it. Nothing that reaches a file changes.
+#
+# What it buys is `skip_value`. That function dispatches on a tag read out of an
+# untrusted file, and it was a run of seven `if`s that a reader had to check by
+# eye against the seven constants. As a match it is exhaustive, so a tag added
+# to the format is a check error in `byte_of`, in `tag_of` and in `skip_value`
+# on the day it is declared, rather than a value that skips silently wrong.
+#
+# The `T` prefix is not decoration: `Bool` and `Str` are type names and `Unit`
+# is close enough to `unit` to misread.
+enum Tag { TTensor, TList, TRecord, TBool, TStr, TUnit, TModel }
+
+fn byte_of(t: Tag) -> I64 {
+  match t {
+    TTensor => TAG_TENSOR,
+    TList => TAG_LIST,
+    TRecord => TAG_RECORD,
+    TBool => TAG_BOOL,
+    TStr => TAG_STR,
+    TUnit => TAG_UNIT,
+    TModel => TAG_MODEL,
+  }
+}
+
+# None for a byte that is not a tag this format defines, which is corruption or
+# a newer writer, and is the caller's to report.
+fn tag_of(v: I64) -> Opt[Tag] {
+  if v == TAG_TENSOR {
+    return Some(TTensor)
+  }
+  if v == TAG_LIST {
+    return Some(TList)
+  }
+  if v == TAG_RECORD {
+    return Some(TRecord)
+  }
+  if v == TAG_BOOL {
+    return Some(TBool)
+  }
+  if v == TAG_STR {
+    return Some(TStr)
+  }
+  if v == TAG_UNIT {
+    return Some(TUnit)
+  }
+  if v == TAG_MODEL {
+    return Some(TModel)
+  }
+  None
+}
+
 # The header is four magic bytes plus one version byte. Named because three
 # functions offset by it and a literal 5 in three places is a bug waiting for
 # the format to grow a field.
@@ -255,61 +310,70 @@ fn skip_value(r: Reader) {
   if len(r.err) > 0 {
     return
   }
-  let tag = read_byte(r)
-  if tag == TAG_TENSOR {
-    let rank = read_i32(r)
-    if rank < 0 or rank > MAX_RANK {
-      fail(r, "corrupt file: tensor rank " + str(rank))
-      return
-    }
-    r.pos = r.pos + rank * 4
-    let n = read_i64(r)
-    if n < 0 {
-      fail(r, "corrupt file: tensor element count " + str(n))
-      return
-    }
-    if not need(r, n * 8) {
-      return
-    }
-    r.pos = r.pos + n * 8
+  let raw = read_byte(r)
+  let tag = match tag_of(raw) {
+    Some(t) => t,
+    None => return fail(r, "corrupt file: unknown value tag " + str(raw)),
+  }
+  match tag {
+    TTensor => skip_tensor(r),
+    TList => skip_list(r),
+    TRecord => skip_record(r),
+    TBool => skip_one_byte(r),
+    TStr => skip_str(r),
+    TUnit => unit,
+    TModel => skip_model(r),
+  }
+}
+
+fn skip_tensor(r: Reader) {
+  let rank = read_i32(r)
+  if rank < 0 or rank > MAX_RANK {
+    fail(r, "corrupt file: tensor rank " + str(rank))
     return
   }
-  if tag == TAG_LIST {
-    let n = read_count(r)
-    let i: I64 = 0
-    while i < n {
-      skip_value(r)
-      i = i + 1
-    }
+  r.pos = r.pos + rank * 4
+  let n = read_i64(r)
+  if n < 0 {
+    fail(r, "corrupt file: tensor element count " + str(n))
     return
   }
-  if tag == TAG_RECORD {
-    let n = read_count(r)
-    let i: I64 = 0
-    while i < n {
-      read_str(r)
-      skip_value(r)
-      i = i + 1
-    }
+  if not need(r, n * 8) {
     return
   }
-  if tag == TAG_BOOL {
-    read_byte(r)
-    return
+  r.pos = r.pos + n * 8
+}
+
+fn skip_list(r: Reader) {
+  let n = read_count(r)
+  let i: I64 = 0
+  while i < n {
+    skip_value(r)
+    i = i + 1
   }
-  if tag == TAG_STR {
+}
+
+fn skip_record(r: Reader) {
+  let n = read_count(r)
+  let i: I64 = 0
+  while i < n {
     read_str(r)
-    return
+    skip_value(r)
+    i = i + 1
   }
-  if tag == TAG_UNIT {
-    return
-  }
-  if tag == TAG_MODEL {
-    let n = read_count(r)
-    read_bytes(r, n)
-    return
-  }
-  fail(r, "corrupt file: unknown value tag " + str(tag))
+}
+
+fn skip_one_byte(r: Reader) {
+  read_byte(r)
+}
+
+fn skip_str(r: Reader) {
+  read_str(r)
+}
+
+fn skip_model(r: Reader) {
+  let n = read_count(r)
+  read_bytes(r, n)
 }
 
 # The byte range one value occupies, as a half-open [lo, hi). Used to hash a
@@ -464,13 +528,13 @@ fn put_f64(out: Bytes, x: F64) {
 }
 
 fn put_str(out: Bytes, s: Str) {
-  b.push(out, TAG_STR)
+  b.push(out, byte_of(TStr))
   put_i32(out, len(s))
   b.push_text(out, s)
 }
 
 fn put_bool(out: Bytes, v: Bool) {
-  b.push(out, TAG_BOOL)
+  b.push(out, byte_of(TBool))
   if v {
     b.push(out, 1)
   } else {
@@ -480,7 +544,7 @@ fn put_bool(out: Bytes, v: Bool) {
 
 # A number, as the rank-0 tensor the reference writes for one.
 fn put_number(out: Bytes, x: F64) {
-  b.push(out, TAG_TENSOR)
+  b.push(out, byte_of(TTensor))
   put_i32(out, 0)
   put_i64(out, 1)
   put_f64(out, x)
@@ -491,7 +555,7 @@ fn put_number(out: Bytes, x: F64) {
 # built dictionary is what keeps the key order under the caller's control, and
 # the key order is part of the bytes.
 fn put_record(out: Bytes, count: I64) {
-  b.push(out, TAG_RECORD)
+  b.push(out, byte_of(TRecord))
   put_i32(out, count)
 }
 
@@ -501,7 +565,7 @@ fn put_key(out: Bytes, key: Str) {
 }
 
 fn put_list(out: Bytes, count: I64) {
-  b.push(out, TAG_LIST)
+  b.push(out, byte_of(TList))
   put_i32(out, count)
 }
 

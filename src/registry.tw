@@ -97,11 +97,9 @@ fn register(r: Registry, man: mf.Manifest, path: Str, stage: Str) -> Str {
     return "refusing to register " + mf.ref_str(man)
       + " with no content digest: write the archive with archive.write first"
   }
-  let existing = find(r, man.name, man.version)
-  if existing >= 0 {
-    return mf.ref_str(man) + " is already registered, pointing at "
-      + r.entries[existing].path
-      + ": a registered version does not change, so publish a new patch"
+  match find(r, man.name, man.version) {
+    Some(existing) => return already_registered(man, r.entries[existing].path),
+    None => unit,
   }
   let contract = check_contract(r, man)
   if len(contract) > 0 {
@@ -124,6 +122,11 @@ fn register(r: Registry, man: mf.Manifest, path: Str, stage: Str) -> Str {
 # takes the same input, and nothing else in this library can promise that.
 #
 # Refused, not warned. A warning here is read once and then filtered.
+fn already_registered(man: mf.Manifest, at: Str) -> Str {
+  mf.ref_str(man) + " is already registered, pointing at " + at
+    + ": a registered version does not change, so publish a new patch"
+}
+
 fn check_contract(r: Registry, man: mf.Manifest) -> Str {
   let want = arc.signature_digest(man.sig)
   let i: I64 = 0
@@ -143,23 +146,22 @@ fn check_contract(r: Registry, man: mf.Manifest) -> Str {
   ""
 }
 
-fn find(r: Registry, name: Str, v: ver.Version) -> I64 {
+fn find(r: Registry, name: Str, v: ver.Version) -> Opt[I64] {
   let i: I64 = 0
   while i < len(r.entries) {
     if r.entries[i].man.name == name and ver.equal(r.entries[i].man.version, v) {
-      return i
+      return Some(i)
     }
     i = i + 1
   }
-  -1
+  None
 }
 
 fn set_stage(r: Registry, name: Str, v: ver.Version, stage: Str) -> Str {
-  let i = find(r, name, v)
-  if i < 0 {
-    return name + "@" + ver.to_str(v) + " is not registered"
+  match find(r, name, v) {
+    Some(i) => r.entries[i].stage = stage,
+    None => return name + "@" + ver.to_str(v) + " is not registered",
   }
-  r.entries[i].stage = stage
   ""
 }
 
@@ -325,9 +327,9 @@ fn ancestry(r: Registry, name: Str, v: ver.Version) -> Arr[Entry] {
   let cur_name = name
   let cur_ver = v
   while true {
-    let i = find(r, cur_name, cur_ver)
-    if i < 0 {
-      return out
+    let i = match find(r, cur_name, cur_ver) {
+      Some(at) => at,
+      None => return out,
     }
     let key = cur_name + "@" + ver.to_str(cur_ver)
     if contains_str(seen, key) {
@@ -335,15 +337,15 @@ fn ancestry(r: Registry, name: Str, v: ver.Version) -> Arr[Entry] {
     }
     seen = arr_push(seen, key)
     out = arr_push(out, r.entries[i])
-    let p = r.entries[i].man.prov
-    if not lin.has_parent(p) {
-      return out
+    let p = match lin.parent(r.entries[i].man.prov) {
+      Some(par) => par,
+      None => return out,
     }
-    let pv = ver.parse(p.parent_version)
+    let pv = ver.parse(p.version)
     if not pv.ok {
       return out
     }
-    cur_name = p.parent_name
+    cur_name = p.name
     cur_ver = pv
   }
   out
@@ -378,22 +380,42 @@ fn broken_links(r: Registry) -> Arr[Str] {
   let out: Arr[Str] = []
   let i: I64 = 0
   while i < len(r.entries) {
-    let e = r.entries[i]
-    let p = e.man.prov
-    if lin.has_parent(p) and len(p.parent_digest) > 0 {
-      let pv = ver.parse(p.parent_version)
-      if pv.ok {
-        let j = find(r, p.parent_name, pv)
-        if j >= 0 and r.entries[j].digest != p.parent_digest {
-          out = arr_push(out, mf.ref_str(e.man) + " names parent "
-            + mf.ref_str(r.entries[j].man)
-            + " with a digest that is not the parent's")
-        }
-      }
+    # `has_parent(p) and len(p.parent_digest) > 0` was a two-part guard standing
+    # in for "a parent that can be checked". The first half is the Opt and the
+    # second is a condition on its contents.
+    let complaint = match lin.parent(r.entries[i].man.prov) {
+      Some(p) => parent_link_complaint(r, r.entries[i], p),
+      None => None,
+    }
+    match complaint {
+      Some(msg) => out = arr_push(out, msg),
+      None => unit,
     }
     i = i + 1
   }
   out
+}
+
+# The message for one entry's parent link, when there is one to make. An Opt
+# rather than "" for "nothing wrong", because this file has just spent its
+# effort removing exactly that convention.
+fn parent_link_complaint(r: Registry, e: Entry, p: lin.Parent) -> Opt[Str] {
+  if len(p.digest) == 0 {
+    return None
+  }
+  let pv = ver.parse(p.version)
+  if not pv.ok {
+    return None
+  }
+  match find(r, p.name, pv) {
+    Some(j) => if r.entries[j].digest != p.digest {
+      return Some(mf.ref_str(e.man) + " names parent "
+        + mf.ref_str(r.entries[j].man)
+        + " with a digest that is not the parent's")
+    },
+    None => unit,
+  }
+  None
 }
 
 # ---- auditing --------------------------------------------------------------
@@ -409,19 +431,23 @@ fn audit(r: Registry) -> Arr[Str] {
   while i < len(r.entries) {
     let e = r.entries[i]
     let integ = arc.verify(e.path)
-    if integ.status == arc.INTEGRITY_UNREADABLE {
-      out = arr_push(out, mf.ref_str(e.man) + ": " + integ.detail)
+    # One match rather than four independent `if`s on an integer. The compiler
+    # now knows these are the outcomes, so an outcome added to arc.Status is
+    # reported here rather than falling through every branch and auditing clean.
+    let msg = match integ.status {
+      Unreadable => mf.ref_str(e.man) + ": " + integ.detail,
+      Absent => mf.ref_str(e.man) + ": the archive declares no digest",
+      Mismatch => mf.ref_str(e.man) + ": " + integ.detail,
+      Intact => if integ.computed != e.digest {
+        mf.ref_str(e.man)
+          + ": the archive is internally consistent and does not match the digest"
+          + " recorded when it was registered, so the file was replaced"
+      } else {
+        ""
+      },
     }
-    if integ.status == arc.INTEGRITY_ABSENT {
-      out = arr_push(out, mf.ref_str(e.man) + ": the archive declares no digest")
-    }
-    if integ.status == arc.INTEGRITY_MISMATCH {
-      out = arr_push(out, mf.ref_str(e.man) + ": " + integ.detail)
-    }
-    if integ.status == arc.INTEGRITY_OK and integ.computed != e.digest {
-      out = arr_push(out, mf.ref_str(e.man)
-        + ": the archive is internally consistent and does not match the digest"
-        + " recorded when it was registered, so the file was replaced")
+    if len(msg) > 0 {
+      out = arr_push(out, msg)
     }
     i = i + 1
   }
@@ -471,9 +497,24 @@ fn save_index(r: Registry) -> Str {
 #
 # A newer index format is refused, by the same rule and for the same reason as
 # the archive format at src/archive.tw.
+# A file that is there and unreadable is NOT the same as a missing one, and this
+# used to treat them alike: `read_text_or(path, "")` returned "" for both, so a
+# registry whose index existed but could not be opened came back empty and the
+# next `register` would happily write a new one over the top of it. The absent
+# case is still an empty registry, because that is the documented behaviour above
+# and it is right. Every other failure is now an error the caller can see.
 fn load_index(path: Str) -> Registry {
   let r = empty(path)
-  let raw = read_text_or(path, "")
+  if not path_exists(path) {
+    return r
+  }
+  let raw = match read_file(path) {
+    Ok(text) => text,
+    Err(e) => {
+      r.err = "cannot read the registry index at " + path + ": " + e
+      return r
+    },
+  }
   if len(raw) == 0 {
     return r
   }

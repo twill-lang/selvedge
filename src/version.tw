@@ -54,13 +54,22 @@ fn parse(raw: Str) -> Version {
   if len(parts) != 3 {
     return bad()
   }
-  let major = parse_i64(parts[0])
-  let minor = parse_i64(parts[1])
-  let patch = parse_i64(parts[2])
-  if major < 0 or minor < 0 or patch < 0 {
-    return bad()
+  match parse_triple(parts) {
+    Some(v) => v,
+    None => bad(),
   }
-  version(major, minor, patch)
+}
+
+# The three components, or nothing. `?` wants an enclosing function returning an
+# Opt and `parse` returns a Version carrying its own `ok`, so the fallible reads
+# live here and `parse` turns one failure into a bad(). It is also the only
+# place the three-of-three rule is written once rather than as a range check on
+# three separately-sentinelled numbers.
+fn parse_triple(parts: Arr[Str]) -> Opt[Version] {
+  let major = parse_i64(parts[0])?
+  let minor = parse_i64(parts[1])?
+  let patch = parse_i64(parts[2])?
+  Some(version(major, minor, patch))
 }
 
 fn split_dot(s: Str) -> Arr[Str] {
@@ -77,23 +86,25 @@ fn split_dot(s: Str) -> Arr[Str] {
   arr_push(out, b.slice(s, start, len(s)))
 }
 
-# A non-negative decimal, or -1. Empty is -1 rather than 0, because "1..3"
-# parsing as 1.0.3 would accept a version nobody wrote.
-fn parse_i64(s: Str) -> I64 {
+# A non-negative decimal, or nothing. The empty string is None rather than 0,
+# because "1..3" parsing as 1.0.3 would accept a version nobody wrote -- and as
+# a -1 that rule held only for as long as every caller remembered to range-check
+# the result before using it.
+fn parse_i64(s: Str) -> Opt[I64] {
   if len(s) == 0 {
-    return -1
+    return None
   }
   let v: I64 = 0
   let i: I64 = 0
   while i < len(s) {
     let c = s[i]
     if c < 48 or c > 57 {
-      return -1
+      return None
     }
     v = v * 10 + (c - 48)
     i = i + 1
   }
-  v
+  Some(v)
 }
 
 fn to_str(v: Version) -> Str {
@@ -126,14 +137,21 @@ fn compare(a: Version, x: Version) -> I64 {
 
 fn equal(a: Version, x: Version) -> Bool = compare(a, x) == 0
 
-let CONSTRAINT_EXACT: I64 = 0
-let CONSTRAINT_CARET: I64 = 1
-let CONSTRAINT_ANY: I64 = 2
+# The three constraint shapes. Two are measured against a version and one is
+# not, which is why the version is a payload rather than a `base` field beside
+# an integer tag: `*` had to be given a `bad()` base that meant nothing, and
+# nothing stopped `satisfies` from reading it. It also makes the dispatch below
+# exhaustive, so adding a fourth shape is a check error at every reader instead
+# of a silent fall-through into the caret branch.
+enum ConstraintKind { Exact(Version), Caret(Version), Any }
 
 struct Constraint {
-  kind: I64,
-  base: Version,
+  kind: ConstraintKind,
   text: Str,
+  # False when the spelling was not one selvedge understands. Kept as a field
+  # rather than making parse_constraint return an Opt, because `text` carries
+  # what the user actually wrote and the error messages in src/registry.tw print
+  # it back to them.
   ok: Bool,
 }
 
@@ -143,20 +161,20 @@ struct Constraint {
 # up as a surprise model swap, which is the worst way to find out.
 fn parse_constraint(raw: Str) -> Constraint {
   if raw == "*" {
-    return Constraint { kind: CONSTRAINT_ANY, base: bad(), text: "*", ok: true }
+    return Constraint { kind: Any, text: "*", ok: true }
   }
   if b.starts_with(raw, "^") {
     let base = parse(b.slice(raw, 1, len(raw)))
     if not base.ok {
-      return Constraint { kind: CONSTRAINT_CARET, base: bad(), text: raw, ok: false }
+      return Constraint { kind: Caret(bad()), text: raw, ok: false }
     }
-    return Constraint { kind: CONSTRAINT_CARET, base: base, text: "^" + to_str(base), ok: true }
+    return Constraint { kind: Caret(base), text: "^" + to_str(base), ok: true }
   }
   let base = parse(raw)
   if not base.ok {
-    return Constraint { kind: CONSTRAINT_EXACT, base: bad(), text: raw, ok: false }
+    return Constraint { kind: Exact(bad()), text: raw, ok: false }
   }
-  Constraint { kind: CONSTRAINT_EXACT, base: base, text: to_str(base), ok: true }
+  Constraint { kind: Exact(base), text: to_str(base), ok: true }
 }
 
 # Caret below 1.0.0 follows cargo and npm: ^0.2.3 allows 0.2.x and not 0.3.0,
@@ -167,20 +185,22 @@ fn satisfies(v: Version, c: Constraint) -> Bool {
   if not c.ok or not v.ok {
     return false
   }
-  if c.kind == CONSTRAINT_ANY {
-    return true
+  match c.kind {
+    Any => true,
+    Exact(base) => equal(v, base),
+    Caret(base) => caret_satisfies(v, base),
   }
-  if c.kind == CONSTRAINT_EXACT {
-    return equal(v, c.base)
-  }
-  if compare(v, c.base) < 0 {
+}
+
+fn caret_satisfies(v: Version, base: Version) -> Bool {
+  if compare(v, base) < 0 {
     return false
   }
-  if c.base.major > 0 {
-    return v.major == c.base.major
+  if base.major > 0 {
+    return v.major == base.major
   }
-  if c.base.minor > 0 {
-    return v.major == 0 and v.minor == c.base.minor
+  if base.minor > 0 {
+    return v.major == 0 and v.minor == base.minor
   }
-  v.major == 0 and v.minor == 0 and v.patch == c.base.patch
+  v.major == 0 and v.minor == 0 and v.patch == base.patch
 }

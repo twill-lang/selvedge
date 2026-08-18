@@ -108,7 +108,10 @@ fn diff_notices_a_hyperparameter_that_was_dropped() {
 fn a_parent_without_a_digest_is_a_link_that_cannot_be_checked() {
   let l = full()
   lin.set_parent(l, "classifier", "1.0.0", "")
-  t.check("having a parent is recorded", lin.has_parent(l))
+  t.check("having a parent is recorded", match lin.parent(l) {
+    Some(p) => p.name == "classifier" and len(p.digest) == 0,
+    None => false,
+  })
   t.check("and the unverifiable link is a gap", len(lin.gaps(l)) > 0)
 }
 

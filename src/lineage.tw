@@ -127,15 +127,31 @@ fn set_hyper(l: Lineage, name: Str, value: Str) {
   l.hp_values = arr_push(l.hp_values, value)
 }
 
-fn hyper(l: Lineage, name: Str) -> Str {
+# The value set for `name`, or None.
+#
+# This is the one the code below uses, because `diff` has to tell a
+# hyperparameter that was dropped from one that is set to the empty string, and
+# a function returning "" for both cannot. It also replaces `has_hyper`, which
+# was the same scan run for its Bool.
+fn hyper_of(l: Lineage, name: Str) -> Opt[Str] {
   let i: I64 = 0
   while i < len(l.hp_names) {
     if l.hp_names[i] == name {
-      return l.hp_values[i]
+      return Some(l.hp_values[i])
     }
     i = i + 1
   }
-  ""
+  None
+}
+
+# The value, or "" when it was never set. Kept because rendering a card and
+# printing a run's settings have no use for the distinction, and every caller
+# writing the same two-line match to get a string back would be noise.
+fn hyper(l: Lineage, name: Str) -> Str {
+  match hyper_of(l, name) {
+    Some(v) => v,
+    None => "",
+  }
 }
 
 fn set_parent(l: Lineage, name: Str, version: Str, digest: Str) {
@@ -144,7 +160,29 @@ fn set_parent(l: Lineage, name: Str, version: Str, digest: Str) {
   l.parent_digest = digest
 }
 
-fn has_parent(l: Lineage) -> Bool = len(l.parent_name) > 0
+# The three parent_* fields, together, when a parent is named.
+#
+# They are stored flat because that is what goes into the card's JSON and the
+# format does not change for this. What changes is how they are read: the
+# predicate this replaces, `has_parent`, told a caller that parent_name was
+# non-empty and left it to remember that the other two fields mean nothing when
+# it is. Every caller then wrote that out by hand, and one of them wrote
+# `has_parent(p) and len(p.parent_digest) > 0`, which is an Opt being unwrapped
+# with an `and`.
+struct Parent {
+  name: Str,
+  version: Str,
+  # May be empty. A parent named without a digest is a link that cannot be
+  # verified, which `gaps` reports; it is not a reason to deny there is a parent.
+  digest: Str,
+}
+
+fn parent(l: Lineage) -> Opt[Parent] {
+  if len(l.parent_name) == 0 {
+    return None
+  }
+  Some(Parent { name: l.parent_name, version: l.parent_version, digest: l.parent_digest })
+}
 
 # The digest of a data file, for `data_digest`.
 #
@@ -154,12 +192,20 @@ fn has_parent(l: Lineage) -> Bool = len(l.parent_name) > 0
 # pipeline hashes identically and may not be. This is the honest limit of a
 # file-level digest and it is still worth having, because the question it does
 # answer, "is this the same file I trained on", is the one that comes up.
-fn data_digest_of_file(path: Str) -> Str {
-  let raw = read_text_or(path, "")
+# It returns a Res, and for this function that is not a tidy-up.
+#
+# The old body was `read_text_or(path, "")` followed by a `return ""` on empty,
+# so a path that was misspelled produced an empty digest -- and an empty
+# data_digest is exactly what `is_reproducible` reads as "this model's training
+# data cannot be identified". A typo in a path therefore downgraded a model's
+# provenance silently, at the one call site whose entire job is to establish it.
+# Nothing about the old signature let a caller notice.
+fn data_digest_of_file(path: Str) -> Res[Str, Str] {
+  let raw = read_file(path)?
   if len(raw) == 0 {
-    return ""
+    return Err(path + " is empty, so it cannot be the data this model was trained on")
   }
-  dg.hash(raw)
+  Ok(dg.hash(raw))
 }
 
 # True when every identifying field is filled in.
@@ -198,8 +244,11 @@ fn gaps(l: Lineage) -> Arr[Str] {
   if len(hyper(l, "seed")) == 0 {
     out = arr_push(out, "no seed recorded: a repeat will be close and not identical")
   }
-  if has_parent(l) and len(l.parent_digest) == 0 {
-    out = arr_push(out, "a parent is named without a digest: the link cannot be verified")
+  match parent(l) {
+    Some(p) => if len(p.digest) == 0 {
+      out = arr_push(out, "a parent is named without a digest: the link cannot be verified")
+    },
+    None => unit,
   }
   out
 }
@@ -275,21 +324,11 @@ fn diff(a: Lineage, x: Lineage) -> Arr[Str] {
   # a difference as one that changed.
   i = 0
   while i < len(x.hp_names) {
-    if not has_hyper(a, x.hp_names[i]) {
-      out = arr_push(out, x.hp_names[i])
+    match hyper_of(a, x.hp_names[i]) {
+      Some(_) => unit,
+      None => out = arr_push(out, x.hp_names[i]),
     }
     i = i + 1
   }
   out
-}
-
-fn has_hyper(l: Lineage, name: Str) -> Bool {
-  let i: I64 = 0
-  while i < len(l.hp_names) {
-    if l.hp_names[i] == name {
-      return true
-    }
-    i = i + 1
-  }
-  false
 }

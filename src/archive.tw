@@ -132,9 +132,12 @@ fn write(a: Archive, path: Str) -> Str {
   if len(err) > 0 {
     return err
   }
-  let raw = read_file_text(path)
+  let raw = match read_file(path) {
+    Ok(text) => text,
+    Err(e) => return "wrote " + path + " and could not read it back: " + e,
+  }
   if len(raw) == 0 {
-    return "wrote " + path + " and read back nothing"
+    return "wrote " + path + " and read back an empty file"
   }
   let d = digest_of_params(raw)
   if len(d.err) > 0 {
@@ -221,9 +224,12 @@ struct Loaded {
 # fails. Reading the header out of the raw bytes first costs a few hundred and
 # produces a message that names the problem.
 fn read(path: Str) -> Loaded {
-  let raw = read_file_text(path)
+  let raw = match read_file(path) {
+    Ok(text) => text,
+    Err(e) => return failed("cannot read " + path + ": " + e),
+  }
   if len(raw) == 0 {
-    return failed("cannot read " + path + ", or it is empty")
+    return failed(path + " is empty, so it is not an archive")
   }
   let r = rstr.reader(raw)
   let herr = rstr.read_header(r)
@@ -264,13 +270,27 @@ fn failed(msg: Str) -> Loaded {
 
 # ---- integrity -------------------------------------------------------------
 
-let INTEGRITY_OK: I64 = 0
-let INTEGRITY_MISMATCH: I64 = 1
-let INTEGRITY_ABSENT: I64 = 2
-let INTEGRITY_UNREADABLE: I64 = 3
+# The four outcomes of a check, as an enum rather than four I64 constants.
+#
+# This is a result type and it was written as a number, which meant `status`
+# would accept any integer, an arm could be forgotten without anyone hearing
+# about it, and `audit` in src/registry.tw dispatched on it with a run of four
+# unrelated `if`s that the compiler had no way to relate. It now matches, and
+# the match is exhaustive: a fifth outcome is a check error at every dispatch
+# site on the day it is added, which is the only time anyone can act on it.
+#
+#  rather than  so the name does not collide with Res.Ok, which is
+# matched a few lines below in this same file.
+#
+# The cases carry nothing. What each one wants to say varies -- a mismatch has
+# two digests, an unreadable file has an operating-system message -- and those
+# already live in the struct's other fields, which every case fills in as far as
+# it can. Four differently shaped payloads would be the more precise design and
+# would rewrite every reader of `declared` and `computed`.
+enum Status { Intact, Mismatch, Absent, Unreadable }
 
 struct Integrity {
-  status: I64,
+  status: Status,
   declared: Str,
   computed: Str,
   detail: Str,
@@ -291,30 +311,38 @@ struct Integrity {
 #
 # Signing is not in v0.1 and is not simulated. docs/needs.md entry 10.
 fn verify(path: Str) -> Integrity {
-  let raw = read_file_text(path)
+  # An unreadable file and an empty one are both Unreadable, and they now say
+  # which they were. "cannot read it, or it is empty" was the old detail for
+  # both, and an operator chasing a failed audit had to go and look.
+  let raw = match read_file(path) {
+    Ok(text) => text,
+    Err(e) => return Integrity { status: Unreadable, declared: "", computed: "",
+                                 detail: "cannot read " + path + ": " + e },
+  }
   if len(raw) == 0 {
-    return Integrity { status: INTEGRITY_UNREADABLE, declared: "", computed: "",
-                       detail: "cannot read " + path + ", or it is empty" }
+    return Integrity { status: Unreadable, declared: "", computed: "",
+                       detail: path + " is empty, so there is nothing to check" }
   }
   let declared = rstr.read_field_str(raw, "digest")
   if len(declared) == 0 {
-    return Integrity { status: INTEGRITY_ABSENT, declared: "", computed: "",
+    return Integrity { status: Absent, declared: "", computed: "",
                        detail: path + " declares no digest, so there is nothing to check against" }
   }
   let d = digest_of_params(raw)
   if len(d.err) > 0 {
-    return Integrity { status: INTEGRITY_UNREADABLE, declared: declared, computed: "",
+    return Integrity { status: Unreadable, declared: declared, computed: "",
                        detail: d.err }
   }
   if d.digest != declared {
-    return Integrity { status: INTEGRITY_MISMATCH, declared: declared, computed: d.digest,
+    return Integrity { status: Mismatch, declared: declared, computed: d.digest,
                        detail: path + " declares " + dg.short(declared, 12)
                          + " and its parameters hash to " + dg.short(d.digest, 12) }
   }
-  Integrity { status: INTEGRITY_OK, declared: declared, computed: d.digest, detail: "" }
+  Integrity { status: Intact, declared: declared, computed: d.digest, detail: "" }
 }
 
-fn is_intact(i: Integrity) -> Bool = i.status == INTEGRITY_OK
+# A payload-free case compares with `==`, so this stays one line.
+fn is_intact(i: Integrity) -> Bool = i.status == Intact
 
 # ---- the contract digest ---------------------------------------------------
 
@@ -345,9 +373,16 @@ fn push_shape(out: Bytes, dims: Arr[I64]) {
   }
 }
 
-# `read_file` returns Res[Bytes, Str] in std/io and selvedge wants one spelling
-# for "the file, or nothing". Isolated here so that when the primitive settles
-# there is one line to change. docs/needs.md entry 2.
-fn read_file_text(path: Str) -> Str {
-  read_text_or(path, "")
-}
+# The wrapper that used to live here is gone.
+#
+# It was `read_text_or(path, "")`, and it was the worst line in this library. A
+# file that is absent, a file the process cannot open, and a file that is
+# present and zero bytes all came back as "", so every caller below said "cannot
+# read it, or it is empty" and meant "one of three things happened and I do not
+# know which". For an archive reader that is not a cosmetic complaint: "the
+# model is not where the registry says" and "the model is there and truncated"
+# are different incidents with different responses, and the library was
+# reporting them identically.
+#
+# `read_file` returns Res[Str, Str] and carries the operating system's message.
+# Callers use it directly now, so there is nothing to wrap.

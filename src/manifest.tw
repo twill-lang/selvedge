@@ -91,29 +91,33 @@ fn record_metric(m: Metrics, name: Str, value: F64) {
   m.values = arr_push(m.values, value)
 }
 
-fn has_metric(m: Metrics, name: Str) -> Bool {
+# The metric, if it was recorded.
+#
+# This is the honest signature and it replaces `has_metric`, which was this
+# search run for its Bool and then, at any caller that wanted the number, run
+# again. The comment on `metric_or` below already made the argument for why the
+# absence of a metric must stay distinguishable from a metric that happens to be
+# zero; an Opt is that argument expressed in the type rather than in a default
+# the caller has to choose well.
+fn metric_of(m: Metrics, name: Str) -> Opt[F64] {
   let i: I64 = 0
   while i < len(m.names) {
     if m.names[i] == name {
-      return true
+      return Some(m.values[i])
     }
     i = i + 1
   }
-  false
+  None
 }
 
 # The metric, or `dflt`. A default rather than a sentinel, because 0.0 is a
 # perfectly good value for a loss and returning it for "absent" would make the
 # two indistinguishable at the point where the difference decides a promotion.
 fn metric_or(m: Metrics, name: Str, dflt: F64) -> F64 {
-  let i: I64 = 0
-  while i < len(m.names) {
-    if m.names[i] == name {
-      return m.values[i]
-    }
-    i = i + 1
+  match metric_of(m, name) {
+    Some(v) => v,
+    None => dflt,
   }
-  dflt
 }
 
 struct Manifest {

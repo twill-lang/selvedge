@@ -47,8 +47,17 @@ mf.record_metric(m.met, "loss", 0.1180)
 # The data by digest, the code by commit, the hyperparameters by name. Every one
 # of these is checkable by someone holding the thing it names, which is what
 # separates lineage from a note saying "trained on the usual data".
-let prov = lin.from_data("blobs/train.csv",
-  lin.data_digest_of_file("blobs/train.csv"), 960)
+#
+# `data_digest_of_file` returns a Res, and this is the reason it does. A
+# misspelled path used to come back as an empty digest, which `gaps` further
+# down would then report as "the training data cannot be identified" -- a true
+# statement about a typo, printed as if it were a fact about the model. Here the
+# unreadable file stops the publish and says which file it was.
+let data_digest = match lin.data_digest_of_file("blobs/train.csv") {
+  Ok(d) => d,
+  Err(e) => abort("cannot digest the training data: " + e),
+}
+let prov = lin.from_data("blobs/train.csv", data_digest, 960)
 lin.set_code(prov, "github.com/example/blobs",
   "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b", false)
 lin.set_hyper(prov, "seed", "20260807")
