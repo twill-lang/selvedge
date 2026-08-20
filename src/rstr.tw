@@ -148,10 +148,18 @@ let MAX_RANK: I64 = 16
 # A cursor over the file's bytes.
 #
 # `err` is set once and never cleared, and every read is a no-op after it is
-# set. The alternative, checking a return value at each of the forty read sites
-# below, is what the subset forces on code that wants `Res` (docs/needs.md
-# entry 3); a sticky error field is the version of that which stays readable.
-# The rule for callers is one check at the end, not forty in the middle.
+# set. The rule for callers is one check at the end, not forty in the middle.
+#
+# This used to be here because `Res` did not exist and then because propagating
+# one through forty read sites was unwritable. Neither is true now: `Res[T, Str]`
+# and postfix `?` both work, and everything else in selvedge that carried an
+# error field has moved onto them. This did not, and the reason is a measurement
+# rather than a limitation -- a byte parser reads a length, then a tag, then a
+# span, and each read's value is used in arithmetic immediately, so `?` at every
+# one of them puts a failure check between every pair of bytes and buries what
+# the parser is doing. A sticky field with one check at the end is what a byte
+# reader looks like in any language that has both options. Keeping it is now a
+# choice, and this comment is the record of it.
 struct Reader {
   src: Str,
   pos: I64,
@@ -394,32 +402,31 @@ fn value_span(r: Reader) -> Span {
 # which is not an error: a reader for format 1 asks a format 2 file for fields
 # it does not have, and that is exactly the case the compatibility rule in
 # docs/format.md says must work.
-struct Lookup {
-  span: Span,
-  found: Bool,
-}
-
-fn find_field(r: Reader, key: Str) -> Lookup {
-  let miss = Lookup { span: Span { lo: 0, hi: 0 }, found: false }
+# An absent key is `None`. This used to be a `Lookup { span, found }`, a struct
+# declared for this one call site whose `found` field every caller had to
+# remember to test -- and nothing made them. `Opt` says the same thing in a type
+# the compiler knows, and a caller that forgets is a diagnostic rather than a
+# span of `{ lo: 0, hi: 0 }` read as though it were real.
+fn find_field(r: Reader, key: Str) -> Opt[Span] {
   let tag = read_byte(r)
   if tag != TAG_RECORD {
     fail(r, "expected a record and found value tag " + str(tag))
-    return miss
+    return None
   }
   let n = read_count(r)
   let i: I64 = 0
   while i < n {
     let k = read_str(r)
     if len(r.err) > 0 {
-      return miss
+      return None
     }
     let sp = value_span(r)
     if k == key {
-      return Lookup { span: sp, found: true }
+      return Some(sp)
     }
     i = i + 1
   }
-  miss
+  None
 }
 
 # The scalar behind a rank-0 tensor. Records written by selvedge store numbers
@@ -454,12 +461,12 @@ fn read_field_f64(src: Str, key: Str) -> F64 {
   if len(read_header(r)) > 0 {
     return 0.0
   }
-  let f = find_field(r, key)
-  if not f.found {
-    return 0.0
+  let sp: Span = match find_field(r, key) {
+    Some(found) => found,
+    None => return 0.0,
   }
   let v = reader(src)
-  v.pos = f.span.lo
+  v.pos = sp.lo
   read_scalar(v)
 }
 
@@ -468,12 +475,12 @@ fn read_field_str(src: Str, key: Str) -> Str {
   if len(read_header(r)) > 0 {
     return ""
   }
-  let f = find_field(r, key)
-  if not f.found {
-    return ""
+  let sp: Span = match find_field(r, key) {
+    Some(found) => found,
+    None => return "",
   }
   let v = reader(src)
-  v.pos = f.span.lo
+  v.pos = sp.lo
   let tag = read_byte(v)
   if tag != TAG_STR {
     return ""

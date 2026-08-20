@@ -50,31 +50,55 @@ for bit, which is the guarantee the format exists to make.
 
 ### 3. Multiple return values, or `Res[T, E]`
 
-**Used by:** `src/archive.tw` (`write`, `read`, `verify`), `src/registry.tw`
-(`register`, `resolve`, `load_index`), `src/card.tw` (`parse`), `src/rstr.tw`
-(`read_header`, and the sticky `Reader.err`)
-**Status:** `Res[T, E]`, `Opt[T]` and postfix `?` landed in twill 1.6, and are
-checked types rather than tolerated text; twill 1.7 closed the generics entry
-they were once said to be waiting on, so a declaration here may take type
-parameters too. Multiple returns are still not designed anywhere. selvedge has
-moved its error-swallowing reads onto `Res` (1.6) and the rest is its own to do.
+**Used by:** `src/archive.tw` (`read`, `digest_of_params`), `src/registry.tw`
+(`resolve`, `resolve_stage`, `load_index`), `src/card.tw` (`parse`, `parse_doc`),
+`src/rstr.tw` (`find_field`)
+**Status:** done for `Res[T, E]` (2026-08, on twill 1.7); multiple return values
+are still not designed anywhere and are a separate want.
 
-Every fallible function in selvedge either returns a `Str` that is empty on
-success, which is loom's and spool's convention and has their problem that the
-compiler does not make anyone read it, or returns a struct declared for that one
-call site. `Loaded`, `Parsed`, `Resolved`, `Integrity`, `DigestResult` and
-`Lookup` are all that struct. Six of them. Not one is a type anyone wanted.
+`Res[T, E]`, `Opt[T]` and postfix `?` landed in twill 1.6 as checked types, and
+selvedge has now moved onto them. Every one-off result struct this entry named
+is gone:
 
-`src/rstr.tw` shows the cost most clearly. Its `Reader` carries a sticky `err`
-field and every read is a no-op once it is set, because the alternative is
-checking a return value at forty read sites in a byte parser. That pattern is
-defensible and it is a hand-rolled error monad, which is what `Res` would be
-if the language had it.
+| was | is |
+| --- | --- |
+| `Lookup { span, found }` | `Opt[Span]` |
+| `Parsed { man, err }` | `Res[mf.Manifest, Str]` |
+| `Loaded { arc, err }` | `Res[Archive, Str]` |
+| `Resolved { entry, found, err }` | `Res[Entry, Str]` |
+| `DigestResult { digest, size, err }` | `Res[Digest, Str]` |
+| `Registry.err` | `load_index -> Res[Registry, Str]` |
 
-`std/json` already uses `Res` and `Opt`, and `src/card.tw` consumes them, so
-this repository is written against a language where they exist in `std/` and not
-in a user's file. That is the actual current state and it is the strongest
-argument for the entry.
+`Resolved` is the one worth naming: it carried a `found` Bool *and* an `err`
+Str, two fields encoding one bit, since every way of failing to resolve
+already carried a message. `Registry.err` is the other -- a load failure stored
+on the registry value and kept there forever, when what failed was the load.
+
+**Two things deliberately did not move.**
+
+`Integrity { status, declared, computed, detail }` stays. This entry listed it
+with the others and that was wrong: it is not an error channel. Its `status` is
+an enum of four outcomes and a caller wants all four fields whatever the outcome
+is, so it is a report, and a report is a type someone wanted. `Digest` is the
+same shape for the same reason -- two values wanted together at both call sites
+-- and what it lost was only the `err` field that made it a failure channel too.
+
+`Reader.err` stays sticky, and the reason is now a measurement rather than a
+limitation. A byte parser reads a length, then a tag, then a span, using each
+value in arithmetic immediately; `?` at every one of forty read sites puts a
+failure check between every pair of bytes and buries what the parser is doing.
+One check at the end is what a byte reader looks like in a language that has
+both options. The comment above `struct Reader` records that as a choice.
+
+**What the compiler now enforces, which is the whole point.** A caller of
+`resolve` cannot reach the entry without handling the failure, because there is
+no entry to reach until the `match` takes the `Ok` arm. Under `Resolved` the
+same caller could read `.entry` and get an empty manifest, and nothing said so.
+
+`std/json` already used `Res` and `Opt` and `src/card.tw` already consumed them,
+so the argument this entry ended on -- that selvedge was written against a
+language where they existed in `std/` and not in a user's file -- no longer
+applies in either direction.
 
 ### 4. Structural reflection over a parameter tree
 

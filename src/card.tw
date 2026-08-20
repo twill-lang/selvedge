@@ -145,13 +145,6 @@ fn render_card(m: mf.Manifest) -> Str = json.render_indent(to_json(m), 2)
 
 # ---- parsing ---------------------------------------------------------------
 
-struct Parsed {
-  man: mf.Manifest,
-  err: Str,
-}
-
-fn failed(msg: Str) -> Parsed = Parsed { man: mf.empty_manifest(), err: msg }
-
 # Read a manifest back out of an archive.
 #
 # Forgiving about missing fields and strict about malformed ones, and those are
@@ -160,21 +153,21 @@ fn failed(msg: Str) -> Parsed = Parsed { man: mf.empty_manifest(), err: msg }
 # designed. A field that is present and is the wrong type is a corrupt file, and
 # the name and the version are the two whose absence is fatal, because without
 # them there is no model to talk about.
-fn parse(src: Str) -> Parsed {
+fn parse(src: Str) -> Res[mf.Manifest, Str] {
   match json.parse(src) {
-    Err(e) => failed("the archive metadata is not valid JSON: " + e.msg),
+    Err(e) => Err("the archive metadata is not valid JSON: " + e.msg),
     Ok(doc) => parse_doc(doc),
   }
 }
 
-fn parse_doc(doc: Json) -> Parsed {
+fn parse_doc(doc: Json) -> Res[mf.Manifest, Str] {
   let name = str_field(doc, "name")
   if len(name) == 0 {
-    return failed("the archive metadata has no name")
+    return Err("the archive metadata has no name")
   }
   let v = ver.parse(str_field(doc, "version"))
   if not v.ok {
-    return failed("the archive metadata has no readable version")
+    return Err("the archive metadata has no readable version")
   }
   let sig_doc = obj_field(doc, "signature")
   let sig = mf.signature(shape_field(sig_doc, "input"),
@@ -188,7 +181,7 @@ fn parse_doc(doc: Json) -> Parsed {
   m.note = str_field(doc, "note")
   m.met = parse_metrics(obj_field(doc, "metrics"))
   m.prov = parse_lineage(obj_field(doc, "lineage"))
-  Parsed { man: m, err: "" }
+  Ok(m)
 }
 
 # The keys of a JSON object, in insertion order, or an empty array if the value

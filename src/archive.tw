@@ -139,11 +139,11 @@ fn write(a: Archive, path: Str) -> Str {
   if len(raw) == 0 {
     return "wrote " + path + " and read back an empty file"
   }
-  let d = digest_of_params(raw)
-  if len(d.err) > 0 {
-    return "wrote " + path + " and could not hash it back: " + d.err
+  let d: Digest = match digest_of_params(raw) {
+    Ok(computed) => computed,
+    Err(msg) => return "wrote " + path + " and could not hash it back: " + msg,
   }
-  a.man.digest = d.digest
+  a.man.digest = d.hash
   a.man.params_bytes = d.size
   write_unhashed(a, path)
 }
@@ -182,10 +182,14 @@ fn to_record(a: Archive) -> Tree {
 
 # ---- reading ---------------------------------------------------------------
 
-struct DigestResult {
-  digest: Str,
+# The two things hashing the params field produces. This is a type someone
+# wanted: both values are wanted together at both call sites, one to record in
+# the manifest and one to compare against what a file declares. What it used to
+# carry as well was an `err: Str`, which made it the failure channel too, and a
+# caller who forgot to read it got the digest of nothing.
+struct Digest {
+  hash: Str,
   size: I64,
-  err: Str,
 }
 
 # The SHA-256 of the params field's exact stored bytes, and its length.
@@ -194,26 +198,23 @@ struct DigestResult {
 # every value can still disagree on a byte, and a digest that depends on which
 # encoder produced it is a digest that fails on files nobody corrupted. The
 # bytes in the file are the only thing both ends can see.
-fn digest_of_params(raw: Str) -> DigestResult {
+fn digest_of_params(raw: Str) -> Res[Digest, Str] {
   let r = rstr.reader(raw)
   let herr = rstr.read_header(r)
   if len(herr) > 0 {
-    return DigestResult { digest: "", size: 0, err: herr }
+    return Err(herr)
   }
-  let f = rstr.find_field(r, "params")
-  if len(r.err) > 0 {
-    return DigestResult { digest: "", size: 0, err: r.err }
+  let found: rstr.Span = match rstr.find_field(r, "params") {
+    Some(sp) => sp,
+    None => {
+      if len(r.err) > 0 {
+        return Err(r.err)
+      }
+      return Err("this file has no params field")
+    },
   }
-  if not f.found {
-    return DigestResult { digest: "", size: 0, err: "this file has no params field" }
-  }
-  let payload = b.slice(raw, f.span.lo, f.span.hi)
-  DigestResult { digest: dg.hash(payload), size: f.span.hi - f.span.lo, err: "" }
-}
-
-struct Loaded {
-  arc: Archive,
-  err: Str,
+  let payload = b.slice(raw, found.lo, found.hi)
+  Ok(Digest { hash: dg.hash(payload), size: found.hi - found.lo })
 }
 
 # Read an archive, checking the framing and the format version before loading
@@ -223,49 +224,42 @@ struct Loaded {
 # checkpoint costs 400 MB and a confusing error from wherever the field access
 # fails. Reading the header out of the raw bytes first costs a few hundred and
 # produces a message that names the problem.
-fn read(path: Str) -> Loaded {
+fn read(path: Str) -> Res[Archive, Str] {
   let raw = match read_file(path) {
     Ok(text) => text,
-    Err(e) => return failed("cannot read " + path + ": " + e),
+    Err(e) => return Err("cannot read " + path + ": " + e),
   }
   if len(raw) == 0 {
-    return failed(path + " is empty, so it is not an archive")
+    return Err(path + " is empty, so it is not an archive")
   }
   let r = rstr.reader(raw)
   let herr = rstr.read_header(r)
   if len(herr) > 0 {
-    return failed(path + ": " + herr)
+    return Err(path + ": " + herr)
   }
   let tag = rstr.read_field_str(raw, "selvedge")
   if tag != TAG {
-    return failed(path + " is a twill save file but not a selvedge archive"
+    return Err(path + " is a twill save file but not a selvedge archive"
       + ", which is what a loom checkpoint looks like from here")
   }
   let fmt = rstr.read_field_i64(raw, "format")
   if fmt > FORMAT {
     # The whole reason the format is versioned from the first commit.
-    return failed(path + " is archive format " + str(fmt)
+    return Err(path + " is archive format " + str(fmt)
       + " and this build of selvedge reads up to format " + str(FORMAT)
       + ": upgrade selvedge to read it")
   }
   if fmt < 1 {
-    return failed(path + " declares archive format " + str(fmt)
+    return Err(path + " declares archive format " + str(fmt)
       + ", which is not a format any selvedge ever wrote")
   }
   let rec = load(path)
-  let man = card.parse(rec.meta)
-  if len(man.err) > 0 {
-    return failed(path + ": " + man.err)
+  let man: mf.Manifest = match card.parse(rec.meta) {
+    Ok(parsed) => parsed,
+    Err(msg) => return Err(path + ": " + msg),
   }
-  man.man.digest = rec.digest
-  Loaded { arc: Archive { man: man.man, params: rec.params }, err: "" }
-}
-
-fn failed(msg: Str) -> Loaded {
-  Loaded {
-    arc: Archive { man: mf.empty_manifest(), params: 0.0 },
-    err: msg,
-  }
+  man.digest = rec.digest
+  Ok(Archive { man: man, params: rec.params })
 }
 
 # ---- integrity -------------------------------------------------------------
@@ -328,17 +322,17 @@ fn verify(path: Str) -> Integrity {
     return Integrity { status: Absent, declared: "", computed: "",
                        detail: path + " declares no digest, so there is nothing to check against" }
   }
-  let d = digest_of_params(raw)
-  if len(d.err) > 0 {
-    return Integrity { status: Unreadable, declared: declared, computed: "",
-                       detail: d.err }
+  let d: Digest = match digest_of_params(raw) {
+    Ok(computed) => computed,
+    Err(msg) => return Integrity { status: Unreadable, declared: declared, computed: "",
+                                   detail: msg },
   }
-  if d.digest != declared {
-    return Integrity { status: Mismatch, declared: declared, computed: d.digest,
+  if d.hash != declared {
+    return Integrity { status: Mismatch, declared: declared, computed: d.hash,
                        detail: path + " declares " + dg.short(declared, 12)
-                         + " and its parameters hash to " + dg.short(d.digest, 12) }
+                         + " and its parameters hash to " + dg.short(d.hash, 12) }
   }
-  Integrity { status: Intact, declared: declared, computed: d.digest, detail: "" }
+  Integrity { status: Intact, declared: declared, computed: d.hash, detail: "" }
 }
 
 # A payload-free case compares with `==`, so this stays one line.

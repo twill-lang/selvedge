@@ -69,11 +69,10 @@ struct Entry {
 struct Registry {
   path: Str,
   entries: Arr[Entry],
-  err: Str,
 }
 
 fn empty(path: Str) -> Registry {
-  Registry { path: path, entries: [], err: "" }
+  Registry { path: path, entries: [] }
 }
 
 # ---- registering -----------------------------------------------------------
@@ -223,19 +222,11 @@ fn versions(r: Registry, name: Str) -> Arr[ver.Version] {
 
 # ---- resolving -------------------------------------------------------------
 
-struct Resolved {
-  entry: Entry,
-  found: Bool,
-  err: Str,
-}
-
-fn not_resolved(msg: Str) -> Resolved {
-  Resolved {
-    entry: Entry { man: mf.empty_manifest(), path: "", digest: "", stage: "" },
-    found: false,
-    err: msg,
-  }
-}
+# Every way of not resolving carries a message saying which -- a constraint that
+# will not parse, a name nobody registered, a range nothing satisfies, a stage
+# label on two versions at once. `Resolved` carried both a `found` Bool and an
+# `err` Str for that, two fields encoding one bit, and nothing made a caller read
+# either. `Res` is the bit, and the compiler makes the caller take both branches.
 
 # The highest registered version of `name` satisfying `constraint`.
 #
@@ -246,15 +237,15 @@ fn not_resolved(msg: Str) -> Resolved {
 # A constraint that no version satisfies is an error carrying the versions that
 # do exist. "nothing matches ^2.0.0" plus "1.4.2, 1.5.0 are registered" is one
 # message that ends the investigation; without the second half it starts one.
-fn resolve(r: Registry, name: Str, constraint: Str) -> Resolved {
+fn resolve(r: Registry, name: Str, constraint: Str) -> Res[Entry, Str] {
   let c = ver.parse_constraint(constraint)
   if not c.ok {
-    return not_resolved("cannot read the version constraint " + constraint
+    return Err("cannot read the version constraint " + constraint
       + ": selvedge understands an exact version, a caret range, and *")
   }
   let all = versions(r, name)
   if len(all) == 0 {
-    return not_resolved("no model named " + name + " is registered")
+    return Err("no model named " + name + " is registered")
   }
   let best = -1
   let i: I64 = 0
@@ -268,10 +259,10 @@ fn resolve(r: Registry, name: Str, constraint: Str) -> Resolved {
     i = i + 1
   }
   if best < 0 {
-    return not_resolved("no version of " + name + " satisfies " + c.text
+    return Err("no version of " + name + " satisfies " + c.text
       + "; registered: " + version_list(all))
   }
-  Resolved { entry: r.entries[best], found: true, err: "" }
+  Ok(r.entries[best])
 }
 
 fn version_list(vs: Arr[ver.Version]) -> Str {
@@ -289,7 +280,7 @@ fn version_list(vs: Arr[ver.Version]) -> Str {
 # "if exactly one does" is load-bearing. Two entries labelled "production" is a
 # state an operator can reach with two calls to `set_stage`, and picking one of
 # them silently is how a rollback lands on the version it was rolling back from.
-fn resolve_stage(r: Registry, name: Str, stage: Str) -> Resolved {
+fn resolve_stage(r: Registry, name: Str, stage: Str) -> Res[Entry, Str] {
   let found = -1
   let count: I64 = 0
   let i: I64 = 0
@@ -301,13 +292,13 @@ fn resolve_stage(r: Registry, name: Str, stage: Str) -> Resolved {
     i = i + 1
   }
   if count == 0 {
-    return not_resolved("no version of " + name + " is labelled " + stage)
+    return Err("no version of " + name + " is labelled " + stage)
   }
   if count > 1 {
-    return not_resolved(str(count) + " versions of " + name + " are labelled "
+    return Err(str(count) + " versions of " + name + " are labelled "
       + stage + ", so there is no single answer: clear the others first")
   }
-  Resolved { entry: r.entries[found], found: true, err: "" }
+  Ok(r.entries[found])
 }
 
 # ---- lineage across entries ------------------------------------------------
@@ -503,57 +494,48 @@ fn save_index(r: Registry) -> Str {
 # next `register` would happily write a new one over the top of it. The absent
 # case is still an empty registry, because that is the documented behaviour above
 # and it is right. Every other failure is now an error the caller can see.
-fn load_index(path: Str) -> Registry {
+fn load_index(path: Str) -> Res[Registry, Str] {
   let r = empty(path)
   if not path_exists(path) {
-    return r
+    return Ok(r)
   }
   let raw = match read_file(path) {
     Ok(text) => text,
-    Err(e) => {
-      r.err = "cannot read the registry index at " + path + ": " + e
-      return r
-    },
+    Err(e) => return Err("cannot read the registry index at " + path + ": " + e),
   }
   if len(raw) == 0 {
-    return r
+    return Ok(r)
   }
   match json.parse(raw) {
-    Err(e) => {
-      r.err = path + " is not valid JSON: " + e.msg
-      r
-    },
+    Err(e) => Err(path + " is not valid JSON: " + e.msg),
     Ok(doc) => read_index(r, doc),
   }
 }
 
-fn read_index(r: Registry, doc: Json) -> Registry {
+fn read_index(r: Registry, doc: Json) -> Res[Registry, Str] {
   let fmt = i64(card.num_field(doc, "index_format"))
   if fmt > INDEX_FORMAT {
-    r.err = r.path + " is index format " + str(fmt)
+    return Err(r.path + " is index format " + str(fmt)
       + " and this build of selvedge reads up to " + str(INDEX_FORMAT)
-      + ": upgrade selvedge to read it"
-    return r
+      + ": upgrade selvedge to read it")
   }
   match json.field(doc, "models") {
-    None => r,
+    None => Ok(r),
     Some(v) => match json.as_array(v) {
-      None => r,
+      None => Ok(r),
       Some(items) => read_entries(r, items),
     },
   }
 }
 
-fn read_entries(r: Registry, items: Arr[Json]) -> Registry {
+fn read_entries(r: Registry, items: Arr[Json]) -> Res[Registry, Str] {
   let i: I64 = 0
   while i < len(items) {
     let o = items[i]
-    let parsed = card.parse_doc(card.obj_field(o, "manifest"))
-    if len(parsed.err) > 0 {
-      r.err = r.path + " entry " + str(i) + ": " + parsed.err
-      return r
+    let man: mf.Manifest = match card.parse_doc(card.obj_field(o, "manifest")) {
+      Ok(parsed) => parsed,
+      Err(msg) => return Err(r.path + " entry " + str(i) + ": " + msg),
     }
-    let man = parsed.man
     man.digest = card.str_field(o, "digest")
     r.entries = arr_push(r.entries, Entry {
       man: man,
@@ -563,5 +545,5 @@ fn read_entries(r: Registry, items: Arr[Json]) -> Registry {
     })
     i = i + 1
   }
-  r
+  Ok(r)
 }

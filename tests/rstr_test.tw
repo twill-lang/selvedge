@@ -113,31 +113,38 @@ fn a_missing_field_is_absence_and_not_an_error() {
   # file for fields it does not have, and gets nothing rather than a failure.
   let r = rstr.reader(sample())
   rstr.read_header(r)
-  let f = rstr.find_field(r, "nothing_named_this")
-  t.check("the field is not found", not f.found)
+  t.check("the field is not found", match rstr.find_field(r, "nothing_named_this") {
+    None => true,
+    Some(_) => false,
+  })
   t.equal_str("and the reader is not in error", r.err, "")
 }
 
 fn a_value_span_covers_exactly_the_value() {
   let r = rstr.reader(sample())
   rstr.read_header(r)
-  let f = rstr.find_field(r, "tag")
-  t.check("found", f.found)
+  let sp: rstr.Span = match rstr.find_field(r, "tag") {
+    Some(found) => found,
+    None => rstr.Span { lo: 0, hi: 0 },
+  }
   # 'S' plus a 4-byte length plus two bytes.
-  t.equal_i64("the string value occupies seven bytes", f.span.hi - f.span.lo, 7)
+  t.equal_i64("the string value occupies seven bytes", sp.hi - sp.lo, 7)
 }
 
 fn skipping_a_value_lands_on_the_next_one() {
   let r = rstr.reader(sample())
   rstr.read_header(r)
-  let f = rstr.find_field(r, "format")
-  t.check("the second field is reachable past the first", f.found)
+  let sp: rstr.Span = match rstr.find_field(r, "format") {
+    Some(found) => found,
+    None => rstr.Span { lo: 0, hi: 0 },
+  }
+  t.check("the second field is reachable past the first", sp.hi > sp.lo)
   # A rank-0 tensor is 21 bytes on the wire: the tag, a four-byte rank of zero,
   # no dimensions, an eight-byte element count of one, and the eight bytes of the
   # double. This asserted thirteen, which is the same value with the element
   # count left out -- a length nothing in the format writes and nothing reads.
-  t.equal_i64("the number occupies twenty-one bytes", f.span.hi - f.span.lo, 21)
-  t.equal_i64("and the file ends there", f.span.hi, len(sample()))
+  t.equal_i64("the number occupies twenty-one bytes", sp.hi - sp.lo, 21)
+  t.equal_i64("and the file ends there", sp.hi, len(sample()))
 }
 
 fn a_truncated_file_is_reported_rather_than_read_past() {

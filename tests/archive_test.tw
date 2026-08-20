@@ -36,23 +36,36 @@ fn params() -> Tree {
 # comparing two empty strings and passing.
 fn params_digest(path: Str) -> Str {
   match read_file(path) {
-    Ok(raw) => arc.digest_of_params(raw).digest,
+    Ok(raw) => match arc.digest_of_params(raw) {
+      Ok(d) => d.hash,
+      Err(msg) => abort("the test could not hash " + path + ": " + msg),
+    },
     Err(e) => abort("the test could not read back " + path + ": " + e),
+  }
+}
+
+# Read an archive the test has just written. A failure here is the test's own
+# setup breaking, not the property under test, so it aborts with the message
+# rather than reporting a confusing assertion about an empty manifest -- which
+# is what the old `Loaded.err` field allowed a caller to skip past.
+fn read_or_abort(path: Str) -> arc.Archive {
+  match arc.read(path) {
+    Ok(a) => a,
+    Err(msg) => abort("the test could not read back " + path + ": " + msg),
   }
 }
 
 fn an_archive_writes_and_reads_back_with_its_metadata_intact() {
   let a = arc.promote(params(), a_manifest())
   t.equal_str("the write succeeds", arc.write(a, t.tmp("archive.slv")), "")
-  let got = arc.read(t.tmp("archive.slv"))
-  t.equal_str("the read succeeds", got.err, "")
-  t.equal_str("the name survives", got.arc.man.name, "blobs")
-  t.equal_str("the version survives", ver.to_str(got.arc.man.version), "1.0.0")
-  t.equal_str("the architecture survives", got.arc.man.architecture, "mlp")
-  t.near("the metric survives", mf.metric_or(got.arc.man.met, "accuracy", 0.0),
+  let got = read_or_abort(t.tmp("archive.slv"))
+  t.equal_str("the name survives", got.man.name, "blobs")
+  t.equal_str("the version survives", ver.to_str(got.man.version), "1.0.0")
+  t.equal_str("the architecture survives", got.man.architecture, "mlp")
+  t.near("the metric survives", mf.metric_or(got.man.met, "accuracy", 0.0),
     0.9583, 0.000001)
-  t.equal_str("the output kind survives", got.arc.man.sig.output_kind, "logits")
-  t.check("the parameters survive", got.arc.params == params())
+  t.equal_str("the output kind survives", got.man.sig.output_kind, "logits")
+  t.check("the parameters survive", got.params == params())
 }
 
 fn a_free_dimension_survives_the_json_round_trip_as_a_free_dimension() {
@@ -60,20 +73,20 @@ fn a_free_dimension_survives_the_json_round_trip_as_a_free_dimension() {
   # 0. A shape with a 0 in it checks against nothing, silently.
   let a = arc.promote(params(), a_manifest())
   arc.write(a, t.tmp("archive.slv"))
-  let got = arc.read(t.tmp("archive.slv"))
-  t.equal_i64("the batch axis is still free", got.arc.man.sig.input[0], -1)
-  t.equal_i64("and the feature axis is still four", got.arc.man.sig.input[1], 4)
+  let got = read_or_abort(t.tmp("archive.slv"))
+  t.equal_i64("the batch axis is still free", got.man.sig.input[0], -1)
+  t.equal_i64("and the feature axis is still four", got.man.sig.input[1], 4)
 }
 
 fn the_lineage_survives_and_is_still_reproducible() {
   let a = arc.promote(params(), a_manifest())
   arc.write(a, t.tmp("archive.slv"))
-  let got = arc.read(t.tmp("archive.slv"))
-  t.equal_str("the commit survives", got.arc.man.prov.code_commit,
+  let got = read_or_abort(t.tmp("archive.slv"))
+  t.equal_str("the commit survives", got.man.prov.code_commit,
     "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b")
-  t.equal_str("the seed survives", lin.hyper(got.arc.man.prov, "seed"), "20260807")
+  t.equal_str("the seed survives", lin.hyper(got.man.prov, "seed"), "20260807")
   t.equal_str("and the lineage digest is unchanged by the round trip",
-    lin.digest(got.arc.man.prov), lin.digest(a_manifest().prov))
+    lin.digest(got.man.prov), lin.digest(a_manifest().prov))
 }
 
 fn a_written_archive_declares_a_digest_and_verifies() {
@@ -126,10 +139,13 @@ fn an_archive_from_a_newer_format_is_refused_with_both_numbers() {
   let raw = b.to_str(out)
   t.equal_i64("the format field reads as nine", rstr.read_field_i64(raw, "format"), 9)
   write_text_or(t.tmp("future.slv"), raw)
-  let got = arc.read(t.tmp("future.slv"))
-  t.check("it is refused", len(got.err) > 0)
-  t.check("the message names the file's format", b.index_of(got.err, "9") >= 0)
-  t.check("and the reader's", b.index_of(got.err, "1") >= 0)
+  let msg: Str = match arc.read(t.tmp("future.slv")) {
+    Err(e) => e,
+    Ok(_) => "",
+  }
+  t.check("it is refused", len(msg) > 0)
+  t.check("the message names the file's format", b.index_of(msg, "9") >= 0)
+  t.check("and the reader's", b.index_of(msg, "1") >= 0)
 }
 
 fn a_twill_save_file_that_is_not_an_archive_is_told_apart() {
@@ -137,10 +153,13 @@ fn a_twill_save_file_that_is_not_an_archive_is_told_apart() {
   # selvedge's fields. Loading it as an archive has to fail here rather than
   # deep inside a field access.
   save({ epoch: 10.0, params: params() }, t.tmp("checkpoint.bin"))
-  let got = arc.read(t.tmp("checkpoint.bin"))
-  t.check("it is refused", len(got.err) > 0)
+  let msg: Str = match arc.read(t.tmp("checkpoint.bin")) {
+    Err(e) => e,
+    Ok(_) => "",
+  }
+  t.check("it is refused", len(msg) > 0)
   t.check("and the message says what it looks like",
-    b.index_of(got.err, "checkpoint") >= 0)
+    b.index_of(msg, "checkpoint") >= 0)
 }
 
 fn an_archive_with_no_name_is_refused_before_it_is_written() {
@@ -169,9 +188,10 @@ fn the_metadata_is_json_a_stranger_can_read() {
     b.index_of(rendered, "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b") >= 0)
   t.check("it states whether the model is reproducible",
     b.index_of(rendered, "\"reproducible\"") >= 0)
-  let back = card.parse(card.render(a_manifest()))
-  t.equal_str("and it parses back", back.err, "")
-  t.equal_str("to the same name", back.man.name, "blobs")
+  match card.parse(card.render(a_manifest())) {
+    Ok(back) => t.equal_str("and it parses back to the same name", back.name, "blobs"),
+    Err(msg) => t.equal_str("and it parses back", msg, ""),
+  }
 }
 
 an_archive_writes_and_reads_back_with_its_metadata_intact()

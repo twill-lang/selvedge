@@ -69,42 +69,56 @@ fn versions_come_back_ascending_and_not_lexically() {
   t.equal_str("and 1.10.0 sorts above 1.2.0", ver.to_str(vs[2]), "1.10.0")
 }
 
+# The entry a resolve is expected to produce. A failure here is the fixture
+# breaking rather than the property under test, so it aborts with the message
+# instead of asserting against an empty manifest -- which is what the old
+# `Resolved.found` field let a caller do by forgetting to check it.
+fn resolved_or_abort(r: Res[reg.Entry, Str]) -> reg.Entry {
+  match r {
+    Ok(e) => e,
+    Err(msg) => abort("the test expected a resolution and got: " + msg),
+  }
+}
+
+# The message from a resolve that is expected to fail; "" if it unexpectedly
+# succeeded, which fails the assertion that follows.
+fn refusal(r: Res[reg.Entry, Str]) -> Str {
+  match r {
+    Err(msg) => msg,
+    Ok(_) => "",
+  }
+}
+
 fn a_caret_resolves_to_the_highest_match() {
-  let got = reg.resolve(stocked(), "blobs", "^1.0.0")
-  t.check("found", got.found)
-  t.equal_str("the highest 1.x", ver.to_str(got.entry.man.version), "1.10.0")
+  let got = resolved_or_abort(reg.resolve(stocked(), "blobs", "^1.0.0"))
+  t.equal_str("the highest 1.x", ver.to_str(got.man.version), "1.10.0")
 }
 
 fn an_exact_constraint_resolves_to_that_version() {
-  let got = reg.resolve(stocked(), "blobs", "1.2.0")
-  t.check("found", got.found)
-  t.equal_str("exactly it", ver.to_str(got.entry.man.version), "1.2.0")
-  t.equal_str("with its path", got.entry.path, "models/blobs-1.2.0.slv")
+  let got = resolved_or_abort(reg.resolve(stocked(), "blobs", "1.2.0"))
+  t.equal_str("exactly it", ver.to_str(got.man.version), "1.2.0")
+  t.equal_str("with its path", got.path, "models/blobs-1.2.0.slv")
 }
 
 fn an_unsatisfiable_constraint_says_what_does_exist() {
   # An error that ends the investigation rather than starting one.
-  let got = reg.resolve(stocked(), "blobs", "^3.0.0")
-  t.check("not found", not got.found)
-  t.check("and the message lists the registered versions", len(got.err) > 20)
+  let msg = refusal(reg.resolve(stocked(), "blobs", "^3.0.0"))
+  t.check("and the message lists the registered versions", len(msg) > 20)
 }
 
 fn an_unknown_name_is_a_different_message_from_an_unmatched_constraint() {
-  let got = reg.resolve(stocked(), "nothing", "*")
-  t.check("not found", not got.found)
-  t.check("the message names the model", len(got.err) > 0)
+  let msg = refusal(reg.resolve(stocked(), "nothing", "*"))
+  t.check("the message names the model", len(msg) > 0)
 }
 
 fn a_stage_resolves_only_when_exactly_one_entry_carries_it() {
   let r = stocked()
-  let got = reg.resolve_stage(r, "blobs", "production")
-  t.check("found", got.found)
-  t.equal_str("the labelled one", ver.to_str(got.entry.man.version), "1.2.0")
+  let got = resolved_or_abort(reg.resolve_stage(r, "blobs", "production"))
+  t.equal_str("the labelled one", ver.to_str(got.man.version), "1.2.0")
 
   reg.set_stage(r, "blobs", ver.parse("1.10.0"), "production")
-  let ambiguous = reg.resolve_stage(r, "blobs", "production")
-  t.check("two labels is not an answer", not ambiguous.found)
-  t.check("and it says so rather than picking one", len(ambiguous.err) > 0)
+  let ambiguous = refusal(reg.resolve_stage(r, "blobs", "production"))
+  t.check("and it says so rather than picking one", len(ambiguous) > 0)
 }
 
 fn lineage_walks_back_through_the_registry() {
@@ -156,19 +170,23 @@ fn a_parent_digest_that_disagrees_with_the_parent_is_reported() {
 fn an_index_round_trips_through_json() {
   let r = stocked()
   t.equal_str("the index writes", reg.save_index(r), "")
-  let back = reg.load_index(t.tmp("index.json"))
-  t.equal_str("and reads without error", back.err, "")
+  let back: reg.Registry = match reg.load_index(t.tmp("index.json")) {
+    Ok(loaded) => loaded,
+    Err(msg) => abort("the index did not read back: " + msg),
+  }
   t.equal_i64("with every entry", len(back.entries), 4)
-  let got = reg.resolve(back, "blobs", "^1.0.0")
-  t.check("and resolution still works", got.found)
-  t.equal_str("on the same answer", ver.to_str(got.entry.man.version), "1.10.0")
-  t.equal_str("with the digest preserved", got.entry.digest, "cccc")
+  let got = resolved_or_abort(reg.resolve(back, "blobs", "^1.0.0"))
+  t.equal_str("on the same answer", ver.to_str(got.man.version), "1.10.0")
+  t.equal_str("with the digest preserved", got.digest, "cccc")
 }
 
 fn a_missing_index_is_an_empty_registry_and_not_an_error() {
-  let r = reg.load_index(t.tmp("index_that_does_not_exist.json"))
-  t.equal_str("no error", r.err, "")
-  t.equal_i64("no entries", len(r.entries), 0)
+  # Absence is `Ok` of an empty registry and not `Err`: a registry nobody has
+  # written yet is the ordinary first-run state, not a failure.
+  match reg.load_index(t.tmp("index_that_does_not_exist.json")) {
+    Ok(r) => t.equal_i64("no entries", len(r.entries), 0),
+    Err(msg) => t.equal_str("no error", msg, ""),
+  }
 }
 
 registering_needs_a_digest()
