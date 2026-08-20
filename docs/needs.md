@@ -53,8 +53,11 @@ for bit, which is the guarantee the format exists to make.
 **Used by:** `src/archive.tw` (`write`, `read`, `verify`), `src/registry.tw`
 (`register`, `resolve`, `load_index`), `src/card.tw` (`parse`), `src/rstr.tw`
 (`read_header`, and the sticky `Reader.err`)
-**Status:** `Res[T, E]` needs generics; multiple returns are not designed
-anywhere.
+**Status:** `Res[T, E]`, `Opt[T]` and postfix `?` landed in twill 1.6, and are
+checked types rather than tolerated text; twill 1.7 closed the generics entry
+they were once said to be waiting on, so a declaration here may take type
+parameters too. Multiple returns are still not designed anywhere. selvedge has
+moved its error-swallowing reads onto `Res` (1.6) and the rest is its own to do.
 
 Every fallible function in selvedge either returns a `Str` that is empty on
 success, which is loom's and spool's convention and has their problem that the
