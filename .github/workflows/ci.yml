@@ -180,3 +180,6 @@ jobs:
 
       - name: Run the tests
         run: ./twill test tests
+
+      # No example-run step. examples/publish.tw loads runs/blobs.params, which
+      # a training run produces and the repository does not carry.
