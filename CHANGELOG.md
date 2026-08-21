@@ -5,9 +5,12 @@
 First cut of selvedge, model serialisation and the model registry for twill,
 written in twill.
 
-It does not run. twill's `mode systems` is still being built. See
-`docs/needs.md` for what is missing and `README.md` for the status table.
-Nothing below has ever executed.
+It runs. `twill test tests` passes six suites and
+`twill run examples/publish.tw` publishes a model and reads it back, both on
+twill 1.7.1. This paragraph said the opposite until `mode systems` landed in
+twill 1.6. See `docs/needs.md` for what the language still owes this library and
+`README.md` for the status table, which names the test or the example behind
+every row.
 
 Added:
 

@@ -76,7 +76,8 @@ struct Lineage {
   # that ruins an investigation.
   parent_digest: Str,
   # DESCRIPTIVE. When, as free text in whatever form the caller has. twill has
-  # no clock; see docs/needs.md entry 5.
+  # `clock_now_ms` as of 1.7 and selvedge does not call it, so this is still
+  # typed by hand; see docs/needs.md entry 5.
   trained_at: Str,
   # DESCRIPTIVE. Anything else.
   note: Str,

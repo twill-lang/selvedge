@@ -7,8 +7,23 @@ mode systems
 # which is the part that is worth anything six months later and is the part
 # everyone skips.
 #
-# This does not run. selvedge is written in twill's systems subset, which is
-# still being implemented. See docs/needs.md.
+#   twill run examples/publish.tw
+#
+# The working directory does not matter: twill resolves an import and a relative
+# path argument against the directory of the file that contains it, so
+# everything below is read from and written to examples/.
+#
+# It runs standalone. What it needs and does not have, it makes, once, under a
+# fixed seed: the two CSVs it digests, and, when there is no trained model to
+# hand, a parameter tree of the right shape filled with untrained weights. The
+# real input is loom's:
+#
+#   cd ../loom  && twill run examples/classifier.tw
+#   cp ../loom/examples/runs/blobs.params examples/runs/blobs.params
+#   twill run examples/publish.tw
+#
+# With that file present this publishes the model loom trained; without it, it
+# publishes the format and says so on the way past.
 
 import "../src/archive.tw" as arc
 import "../src/manifest.tw" as mf
@@ -17,10 +32,100 @@ import "../src/lineage.tw" as lin
 import "../src/version.tw" as ver
 import "../src/card.tw" as card
 
+# ---- the fixtures ----------------------------------------------------------
+#
+# Written once, under a fixed seed, so this file has an input on a machine that
+# has never run loom. They are generated rather than checked in because CI's
+# source gate refuses any file in this repository that is not twill or
+# documentation, and a fixture that has to be exempted from that gate is a
+# fixture that will rot.
+
+let CLASSES = 3
+let FEATURES = 4
+
+fn blob_rows(per_class: I64, s: I64) -> Tensor {
+  seed(s)
+  let centres = [[2.0, 0.0, -1.0, 0.5], [-2.0, 1.0, 0.0, -0.5], [0.0, -2.0, 1.5, 0.0]]
+  let xs: Arr[Tensor] = []
+  let c = 0
+  while c < CLASSES {
+    push(xs, randn(per_class, FEATURES) * 0.8 + centres[c])
+    c = c + 1
+  }
+  concat(xs, 0)
+}
+
+# Four features and a class index per line. The contents do not matter to
+# selvedge, which digests the bytes and counts the rows; what matters is that
+# the same seed produces the same bytes, so the digest below is stable.
+fn write_rows(path: Str, per_class: I64, s: I64) -> I64 {
+  let x = blob_rows(per_class, s)
+  let rows = shape(x)[0]
+  let out = ""
+  let i = 0
+  while i < rows {
+    let line = ""
+    let j = 0
+    while j < FEATURES {
+      if j > 0 { line = line + "," }
+      line = line + str(item(x[i][j]))
+      j = j + 1
+    }
+    out = out + line + "," + str(i / per_class) + "
+"
+    i = i + 1
+  }
+  write_file(path, out)
+  rows
+}
+
+fn ensure_rows(path: Str, per_class: I64, s: I64) -> I64 {
+  if path_exists(path) {
+    return shape(read_csv(path))[0]
+  }
+  write_rows(path, per_class, s)
+}
+
+mkdir_all("blobs")
+mkdir_all("runs")
+
+# From scratch, every run. A registered version does not change, so a second
+# `register` of blobs@1.2.0 into a surviving index is refused, correctly. An
+# example that failed on its second run because of a rule it is demonstrating
+# would teach the wrong lesson, so it starts from an empty registry.
+remove_all("models")
+mkdir_all("models")
+
+let TRAIN_ROWS = ensure_rows("blobs/train.csv", 96, 20260807)
+let VAL_ROWS = ensure_rows("blobs/val.csv", 24, 20260808)
+
 # The parameters. In a real program these come off a training run: loom's
 # `run.params` after `fit`, or the tree you handed to `grad`. selvedge does not
 # care which, and deliberately does not know: it takes a tree.
-let params = load("runs/blobs.params")
+#
+# Absent that file this publishes an untrained tree of the same shape, so the
+# format, the lineage and the registry are all exercised and the weights are
+# not a model. That is said out loud rather than left for someone to find in
+# six months, which is the whole argument of this file applied to itself.
+fn untrained_params() -> Tree {
+  seed(20260807)
+  {
+    w1: randn(16, FEATURES) * 0.1,
+    b1: zeros(16),
+    w2: randn(CLASSES, 16) * 0.1,
+    b2: zeros(CLASSES),
+  }
+}
+
+let TRAINED = path_exists("runs/blobs.params")
+if not TRAINED {
+  print("runs/blobs.params is absent, so these are untrained weights.")
+  print("For the real thing, from a checkout of loom beside this one:")
+  print("  cd ../loom && twill run examples/classifier.tw")
+  print("  cp ../loom/examples/runs/blobs.params examples/runs/blobs.params")
+}
+
+let params = if TRAINED { load("runs/blobs.params") } else { untrained_params() }
 
 # ---- the contract ----------------------------------------------------------
 #
@@ -38,9 +143,14 @@ m.architecture_detail = "dense 4->16, relu, dense 16->3"
 # With the dataset it scored on. A metric without a dataset is a number without
 # a unit, so `metrics` takes both and there is no way to record one without the
 # other.
-m.met = mf.metrics("blobs/val.csv", 240)
+#
+# The two values are the ones loom's examples/classifier.tw prints for its best
+# epoch on this data. They describe the trained tree, so with the untrained
+# fallback above they describe a model that is not in this archive; recording a
+# metric selvedge cannot check is exactly the thing this file is about.
+m.met = mf.metrics("blobs/val.csv", VAL_ROWS)
 mf.record_metric(m.met, "accuracy", 0.9583)
-mf.record_metric(m.met, "loss", 0.1180)
+mf.record_metric(m.met, "loss", 0.1542)
 
 # ---- what produced it ------------------------------------------------------
 #
@@ -57,7 +167,7 @@ let data_digest = match lin.data_digest_of_file("blobs/train.csv") {
   Ok(d) => d,
   Err(e) => abort("cannot digest the training data: " + e),
 }
-let prov = lin.from_data("blobs/train.csv", data_digest, 960)
+let prov = lin.from_data("blobs/train.csv", data_digest, TRAIN_ROWS)
 lin.set_code(prov, "github.com/example/blobs",
   "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b", false)
 lin.set_hyper(prov, "seed", "20260807")
@@ -103,10 +213,9 @@ write_text_or("models/blobs-1.2.0.json", card.render_card(a.man))
 
 # ---- register it -----------------------------------------------------------
 
-let r = reg.load_index("models/index.json")
-if len(r.err) > 0 {
-  print("selvedge: " + r.err)
-  exit(1)
+let r = match reg.load_index("models/index.json") {
+  Ok(reg_in) => reg_in,
+  Err(e) => abort("cannot read the registry index: " + e),
 }
 
 # This is where a changed input shape under an unchanged major version is
@@ -120,22 +229,24 @@ reg.save_index(r)
 
 # ---- read it back ----------------------------------------------------------
 
-let resolved = reg.resolve(r, "blobs", "^1.0.0")
-if not resolved.found {
-  print("selvedge: " + resolved.err)
-  exit(1)
+let resolved = match reg.resolve(r, "blobs", "^1.0.0") {
+  Ok(entry) => entry,
+  Err(e) => abort("selvedge: " + e),
 }
 
-let integ = arc.verify(resolved.entry.path)
+let integ = arc.verify(resolved.path)
 if not arc.is_intact(integ) {
   print("selvedge: " + integ.detail)
   exit(1)
 }
 
-let loaded = arc.read(resolved.entry.path)
-print("resolved blobs ^1.0.0 to " + mf.ref_str(loaded.arc.man))
-print("  accuracy " + str(mf.metric_or(loaded.arc.man.met, "accuracy", 0.0)))
-print("  digest   " + loaded.arc.man.digest)
+let loaded = match arc.read(resolved.path) {
+  Ok(back) => back,
+  Err(e) => abort("selvedge: " + e),
+}
+print("resolved blobs ^1.0.0 to " + mf.ref_str(loaded.man))
+print("  accuracy " + str(mf.metric_or(loaded.man.met, "accuracy", 0.0)))
+print("  digest   " + loaded.man.digest)
 
 # What else came off the parent. The question that matters when a model turns
 # out to have been trained on data that was wrong.
