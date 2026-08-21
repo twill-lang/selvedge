@@ -7,6 +7,12 @@ twill_modules/
 models/
 *.slv
 
+# The fixtures examples/publish.tw generates on first use, and the parameter
+# tree copied in from loom. Generated rather than checked in, because the source
+# gate refuses a file in this repository that is not twill or documentation.
+examples/blobs/
+examples/runs/
+
 # Files the tests write. There is no remove_file in the subset, so a test
 # cannot clean up after itself; see docs/needs.md entry 15.
 tmp_*.slv

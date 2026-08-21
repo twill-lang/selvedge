@@ -24,16 +24,72 @@
 `selvedge` is written in twill, in `.tw` files, using `mode systems`. That subset
 did not exist when this library was written, so for a long time none of the code
 here executed and this section said so. twill 1.6 is the release that closed it:
-the 6 test suites under `tests/` pass, and CI runs them against a released
-twill on every push rather than gating on the prose in this file.
+the 6 test suites under `tests/` pass, the example publishes and resolves a
+model, and CI runs both against a released twill on every push rather than
+gating on the prose in this file.
+
+You need twill 1.7.0 or newer. Get one:
 
 ```bash
-twill test tests
+curl -fsSL -o twill https://github.com/twill-lang/twill/releases/download/v1.7.1/twill-v1.7.1-linux-amd64
+chmod +x twill
 ```
 
-You need twill 1.7.0 or newer. `docs/needs.md` is still worth reading -- it
-is the list of what this library asked the language for, and it now records
-which of those arrived and which are still open.
+The asset name is `twill-v1.7.1-<os>-<arch>`: `linux-amd64`, `linux-arm64`,
+`darwin-amd64`, `darwin-arm64`, `windows-amd64.exe`.
+
+The suite, from the repository root:
+
+```
+$ twill test tests
+ok    tests/archive_test.tw
+ok    tests/digest_test.tw
+ok    tests/lineage_test.tw
+ok    tests/registry_test.tw
+ok    tests/rstr_test.tw
+ok    tests/version_test.tw
+
+6 file(s): 6 passed, 0 failed
+```
+
+And the example, which publishes a model, registers it and reads it back:
+
+```
+$ twill run examples/publish.tw
+runs/blobs.params is absent, so these are untrained weights.
+For the real thing, from a checkout of loom beside this one:
+  cd ../loom && twill run examples/classifier.tw
+  cp ../loom/examples/runs/blobs.params examples/runs/blobs.params
+resolved blobs ^1.0.0 to blobs@1.2.0
+  accuracy 0.9583
+  digest   6eb801f966d173c7a9b6cf20313258cd4c74c807635415c89a796c3efae7694c
+  derived from 1.1.0: 1 model(s)
+```
+
+That is the standalone run: with no trained parameters to hand, the example
+generates a tree of the right shape, publishes it, and says on the way past that
+the weights are not a model. Do what it tells you and the first three lines go
+away and the digest changes, because the digest is over the weights:
+
+```
+$ cd ../loom && twill run examples/classifier.tw
+$ cp ../loom/examples/runs/blobs.params examples/runs/blobs.params
+$ twill run examples/publish.tw
+resolved blobs ^1.0.0 to blobs@1.2.0
+  accuracy 0.9583
+  digest   1af561e0982a69df955691f179dedaea7216397b811afec2655acf3e0b97553e
+  derived from 1.1.0: 1 model(s)
+```
+
+The `accuracy 0.9583` is recorded by hand in the example and is the number
+loom's run prints for its best epoch. selvedge stores a metric and never checks
+one, which is stated at `mf.record_metric` and is worth seeing here: the
+standalone run above reports the same figure over weights that were never
+trained.
+
+`docs/needs.md` is still worth reading -- it is the list of what this library
+asked the language for, and it now records which of those arrived and which are
+still open.
 
 ## What selvedge is
 
@@ -47,19 +103,23 @@ accepted on, the lineage that produced it, and a content hash over the bytes.
 resolution, a second copy of every digest, and lineage links you can walk
 backwards and forwards.
 
+Every row below names the test or the example that runs it. A row that names
+nothing is a row that claims nothing.
+
 | Piece | State |
 | --- | --- |
-| Archive format v1, versioned and specified from the first commit | written, unrun |
-| Full compatibility with twill's `RSTR` tensor encoding | written, unrun |
-| SHA-256 content hashing and integrity verification | written, unrun |
-| A refusal, by name, when a file is from a newer format | written, unrun |
-| Register, list, resolve a version constraint, stage labels | written, unrun |
-| Lineage: data, code commit, hyperparameters, parent chain | written, unrun |
-| Contract checking: two versions sharing a major must agree on shapes | written, unrun |
-| JSON metadata export, so a model card needs neither selvedge nor twill | written, unrun |
-| Signing, or any claim about a model's origin | **not in v0.1.** See below |
+| Archive format v1, versioned and specified from the first commit | runs. `tests/archive_test.tw` writes one and reads it back with its metadata intact |
+| Full compatibility with twill's `RSTR` tensor encoding | runs. `tests/rstr_test.tw`, and `a_twill_save_file_that_is_not_an_archive_is_told_apart` |
+| SHA-256 content hashing and integrity verification | runs. `tests/digest_test.tw` pins four published vectors; `a_tampered_payload_is_caught` covers the rest |
+| A refusal, by name, when a file is from a newer format | runs. `an_archive_from_a_newer_format_is_refused_with_both_numbers` |
+| Register, list, resolve a version constraint, stage labels | runs. `tests/registry_test.tw`, twelve cases including the unsatisfiable ones |
+| Lineage: data, code commit, hyperparameters, parent chain | runs. `tests/lineage_test.tw`, and the example prints its gaps |
+| Contract checking: two versions sharing a major must agree on shapes | runs. `a_changed_contract_within_a_major_is_refused` |
+| JSON metadata export, so a model card needs neither selvedge nor twill | runs. `the_metadata_is_json_a_stranger_can_read`, and the example writes `models/blobs-1.2.0.json` |
+| Signing, or any claim about a model's origin | **not in v0.1.** Nothing here does it. See below |
 | A remote registry, or fetching | **not in scope.** selvedge is local |
-| Anything running end to end | **no** |
+| Concurrent writers | **not handled.** One operator, one machine. See below |
+| Anything running end to end | runs. `twill run examples/publish.tw`, output above |
 
 ## An archive is not a checkpoint
 
@@ -207,8 +267,15 @@ mf.record_metric(m.met, "accuracy", 0.9583)
 
 # What produced it. Every one of these is checkable by someone holding the
 # thing it names.
-let prov = lin.from_data("blobs/train.csv",
-  lin.data_digest_of_file("blobs/train.csv"), 960)
+# `data_digest_of_file` returns a Res, and that is the point: a misspelled path
+# used to come back as an empty digest, which `gaps` then reported as "the
+# training data cannot be identified", a true statement about a typo printed as
+# a fact about the model.
+let digest = match lin.data_digest_of_file("blobs/train.csv") {
+  Ok(d) => d,
+  Err(e) => abort("cannot digest the training data: " + e),
+}
+let prov = lin.from_data("blobs/train.csv", digest, 288)
 lin.set_code(prov, "github.com/example/blobs", "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b", false)
 lin.set_hyper(prov, "seed", "20260807")
 lin.set_hyper(prov, "lr", "0.01")
@@ -218,23 +285,34 @@ m.prov = prov
 let a = arc.promote(params, m)
 let err = arc.write(a, "models/blobs-1.2.0.slv")
 
-let r = reg.load_index("models/index.json")
+let r = match reg.load_index("models/index.json") {
+  Ok(index) => index,
+  Err(e) => abort("cannot read the registry index: " + e),
+}
 reg.register(r, a.man, "models/blobs-1.2.0.slv", "candidate")
 reg.save_index(r)
 ```
 
-And reading it back:
+And reading it back. `resolve` and `read` return a `Res` too, for the same
+reason: a model that is not there and a model that is corrupt are different
+answers and neither is a record with an empty field in it.
 
 ```rust
-let resolved = reg.resolve(r, "blobs", "^1.0.0")
-let integ = arc.verify(resolved.entry.path)
-let loaded = arc.read(resolved.entry.path)
+let entry = match reg.resolve(r, "blobs", "^1.0.0") {
+  Ok(e) => e,
+  Err(msg) => abort("selvedge: " + msg),
+}
+let integ = arc.verify(entry.path)
+let loaded = match arc.read(entry.path) {
+  Ok(back) => back,
+  Err(msg) => abort("selvedge: " + msg),
+}
 ```
 
 ```
 resolved blobs ^1.0.0 to blobs@1.2.0
   accuracy 0.9583
-  digest   4a7d1ed414474e4033ac29ccb8653d9b1ee8a2a4f8b7c9a1d3e5f7091b2c4d6e
+  digest   1af561e0982a69df955691f179dedaea7216397b811afec2655acf3e0b97553e
   derived from 1.1.0: 1 model(s)
 ```
 
@@ -265,7 +343,10 @@ about what the files say today.
 
 - **One operator, one machine.** The index is rewritten whole on every change,
   with no locking, because twill has no locking. Two processes registering at
-  once will lose one of the writes. `docs/needs.md` entry 12.
+  once will lose one of the writes. twill 1.7 does have `rename`, so the
+  narrower failure, a crash part-way through writing the index, could be made
+  harmless by writing beside it and renaming over; `save_index` does not do
+  that yet. `docs/needs.md` entry 12.
 - **No fetching.** There is no remote registry, no upload, no download. selvedge
   indexes files that are already on your disk.
 - **No signing.** See above.
@@ -274,22 +355,32 @@ about what the files say today.
   them. selvedge cannot encode a parameter tree itself because the subset gives
   no way to walk one structurally, so it writes, reads back, hashes and writes
   again. `docs/needs.md` entry 4, whose narrow fix is `save_bytes`.
-- **Hashing is interpreted and slow.** On the order of a megabyte per second.
-  selvedge hashes on write and on an explicit `verify`, never on an ordinary
-  read, and that is a design shaped around a missing builtin. `docs/needs.md`
-  entry 7.
+- **Hashing is interpreted and very slow.** Measured on twill 1.7.1, timing
+  `dg.hash` with `mono_ns` on one machine: 262144 bytes in 19.5 s, and 65536
+  bytes in 9.5 s and 6.2 s on two runs. That is about 10 to 15 kilobytes per
+  second, not the megabyte per second this file used to claim, and the claim
+  was never measured. A 100 MB archive is therefore not verifiable in
+  practice, and that is a gate on selvedge being used for real models rather
+  than a footnote. selvedge hashes on write and on an explicit `verify`, never
+  on an ordinary read, and that is a design shaped around a missing builtin.
+  `docs/needs.md` entry 7.
 
 ## Install
 
-Once spool and `mode systems` both work:
+`mode systems` works. spool does not vendor selvedge for you yet, so until it
+does the two ways in are a clone beside your project, or:
 
 ```
 spool add selvedge https://github.com/twill-lang/selvedge
 ```
 
-spool vendors into `twill_modules/`, and twill's import is a path, so the import
-lines are the long ones in the example above and they resolve relative to the
-project root. That is twill's rule rather than selvedge's; see spool's README.
+spool vendors into `twill_modules/`, and twill's import is a path, which is why
+the import lines above are the long ones. **A path in twill, whether it is an
+import or an argument to `read_file` or `save`, resolves against the directory
+of the file that contains it, not against the working directory.** So
+`twill run examples/publish.tw` reads and writes under `examples/` whatever
+directory you invoke it from. That is twill's rule rather than selvedge's; see
+spool's README.
 
 ## Repository layout
 

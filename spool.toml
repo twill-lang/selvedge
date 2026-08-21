@@ -15,4 +15,4 @@ entry = "src/archive.tw"
 # release that changed it would break this package silently rather than loudly.
 # spool has no notion of a toolchain dependency, so it is declared as an
 # ordinary git dependency.
-twill = { version = "^1.5.0", git = "https://github.com/twill-lang/twill" }
+twill = { version = "^1.7.0", git = "https://github.com/twill-lang/twill" }

@@ -155,10 +155,10 @@ jobs:
       # would have. Pinned rather than floating: a green run should mean this
       # code passed against a known compiler, not against whatever was newest
       # that morning.
-      - name: Install twill v1.7.0
+      - name: Install twill v1.7.1
         run: |
           curl -fsSL -o twill \
-            https://github.com/twill-lang/twill/releases/download/v1.7.0/twill-v1.7.0-linux-amd64
+            https://github.com/twill-lang/twill/releases/download/v1.7.1/twill-v1.7.1-linux-amd64
           chmod +x twill
           ./twill --version
 
@@ -181,5 +181,14 @@ jobs:
       - name: Run the tests
         run: ./twill test tests
 
-      # No example-run step. examples/publish.tw loads runs/blobs.params, which
-      # a training run produces and the repository does not carry.
+      # Checking an example is not the same as running it. `twill check`
+      # follows imports for enum declarations only, so it cannot see a call
+      # into another module whose signature changed. examples/publish.tw was
+      # reading an `err` field off `load_index` and `resolve` long after both
+      # returned a `Res`, and checking it never said so.
+      #
+      # It runs here without a training run. examples/publish.tw generates the
+      # two CSVs it digests, and publishes an untrained tree of the right shape
+      # when runs/blobs.params is absent, saying so on the way past.
+      - name: Run the examples
+        run: ./twill run examples/publish.tw > /dev/null
