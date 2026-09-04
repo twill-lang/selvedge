@@ -28,14 +28,14 @@ the 6 test suites under `tests/` pass, the example publishes and resolves a
 model, and CI runs both against a released twill on every push rather than
 gating on the prose in this file.
 
-You need twill 1.7.0 or newer. Get one:
+You need twill 1.9.0 or newer. Get one:
 
 ```bash
-curl -fsSL -o twill https://github.com/twill-lang/twill/releases/download/v1.7.1/twill-v1.7.1-linux-amd64
+curl -fsSL -o twill https://github.com/twill-lang/twill/releases/download/v1.9.0/twill-v1.9.0-linux-amd64
 chmod +x twill
 ```
 
-The asset name is `twill-v1.7.1-<os>-<arch>`: `linux-amd64`, `linux-arm64`,
+The asset name is `twill-v1.9.0-<os>-<arch>`: `linux-amd64`, `linux-arm64`,
 `darwin-amd64`, `darwin-arm64`, `windows-amd64.exe`.
 
 The suite, from the repository root:
