@@ -206,18 +206,20 @@ fn versions(r: Registry, name: Str) -> Arr[ver.Version] {
   let i: I64 = 0
   while i < len(r.entries) {
     if r.entries[i].man.name == name {
-      let v = r.entries[i].man.version
-      let j = len(out)
-      out = arr_push(out, v)
-      while j > 0 and ver.compare(out[j - 1], v) > 0 {
-        out[j] = out[j - 1]
-        out[j - 1] = v
-        j = j - 1
-      }
+      out = arr_push(out, r.entries[i].man.version)
     }
     i = i + 1
   }
-  out
+  # twill 1.9.0's sort takes the comparison, which is what `docs/needs.md` entry
+  # 13 asked for: a version has no order of its own that the language could
+  # know, and `ver.compare` is the one that matters here. The insertion sort
+  # this replaces was the sixth hand-written sort in the ecosystem and the last.
+  #
+  # The builtin is a stable merge sort, and stability is not decoration here:
+  # two entries can register the same version, and which of them comes first
+  # must stay the order they were registered in rather than the order a sort
+  # happened to leave them.
+  sort(out, fn(a: ver.Version, b: ver.Version) -> Bool = ver.compare(a, b) < 0)
 }
 
 # ---- resolving -------------------------------------------------------------

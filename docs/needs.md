@@ -290,10 +290,17 @@ registry and says so in the README.
 ### 13. A generic sort, or a comparison-function parameter
 
 **Would improve:** `src/registry.tw` (`versions`)
-**Status:** no generic sort; function parameters are undesigned.
+**Status: delivered in twill 1.9.0, and adopted.**
 
-`versions` is an insertion sort by version, written out by hand. loom has one,
-spool has four. This is the sixth in the ecosystem.
+`versions` was an insertion sort by version, written out by hand. loom had one,
+spool four. This was the sixth in the ecosystem and the last of them: 1.9.0's
+`sort` takes the comparison, which is the form this entry asked for, because a
+version has no order the language could know and `ver.compare` is the one that
+matters.
+
+The builtin is a stable merge sort, and stability is what the hand-written one
+also had by accident: two entries can register the same version, and which
+comes first should stay the order they were registered in.
 
 ### 14. A test runner
 
