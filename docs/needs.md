@@ -181,8 +181,11 @@ because it was not safe to hash something with that property.
 
 **Needs:** SHA-256 as a `std/` module, and a builtin for large inputs
 **Used by:** `src/digest.tw`, which is the whole file
-**Status:** the `std/` half is DELIVERED and selvedge has not taken it up. The
-builtin half is still open and matters more than this entry said.
+**Status:** DELIVERED, both halves, and taken up. `std/hash` arrived in twill
+1.7 and `src/digest.tw` wrapped it; the `sha256` builtin arrived in 1.11 and
+`src/digest.tw` calls it now. Measured with `mono_ns` on one machine: 16 MB in
+6.5 ms, where `std/hash` took 0.69 s for 65536 bytes. The record below is kept
+because the numbers in it are what made the builtin necessary.
 
 `std/hash` exists in twill 1.7.1 and is SHA-256 written over I64, the same
 algorithm `src/digest.tw` wraps. The drift argument below is therefore
