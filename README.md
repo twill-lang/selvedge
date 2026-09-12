@@ -28,14 +28,14 @@ the 6 test suites under `tests/` pass, the example publishes and resolves a
 model, and CI runs both against a released twill on every push rather than
 gating on the prose in this file.
 
-You need twill 1.9.0 or newer. Get one:
+You need twill 1.12.0 or newer. Get one:
 
 ```bash
-curl -fsSL -o twill https://github.com/twill-lang/twill/releases/download/v1.9.0/twill-v1.9.0-linux-amd64
+curl -fsSL -o twill https://github.com/twill-lang/twill/releases/download/v1.12.0/twill-v1.12.0-linux-amd64
 chmod +x twill
 ```
 
-The asset name is `twill-v1.9.0-<os>-<arch>`: `linux-amd64`, `linux-arm64`,
+The asset name is `twill-v1.12.0-<os>-<arch>`: `linux-amd64`, `linux-arm64`,
 `darwin-amd64`, `darwin-arm64`, `windows-amd64.exe`.
 
 The suite, from the repository root:
@@ -355,15 +355,11 @@ about what the files say today.
   them. selvedge cannot encode a parameter tree itself because the subset gives
   no way to walk one structurally, so it writes, reads back, hashes and writes
   again. `docs/needs.md` entry 4, whose narrow fix is `save_bytes`.
-- **Hashing is interpreted and very slow.** Measured on twill 1.7.1, timing
-  `dg.hash` with `mono_ns` on one machine: 262144 bytes in 19.5 s, and 65536
-  bytes in 9.5 s and 6.2 s on two runs. That is about 10 to 15 kilobytes per
-  second, not the megabyte per second this file used to claim, and the claim
-  was never measured. A 100 MB archive is therefore not verifiable in
-  practice, and that is a gate on selvedge being used for real models rather
-  than a footnote. selvedge hashes on write and on an explicit `verify`, never
-  on an ordinary read, and that is a design shaped around a missing builtin.
-  `docs/needs.md` entry 7.
+- **Hashing used to be interpreted and very slow.** It is the `sha256`
+  builtin now, from twill 1.11: 16 MB in 6.5 ms with `mono_ns` on one machine,
+  where `std/hash` took 0.69 s for 65536 bytes on the same machine. A 100 MB
+  archive is verifiable. selvedge still hashes on write and on an explicit
+  `verify`, never on an ordinary read. `docs/needs.md` entry 7.
 
 ## Install
 

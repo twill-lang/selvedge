@@ -4,6 +4,13 @@
 
 ### Changed
 
+- **The digest is the builtin.** twill 1.11's `sha256` is the same digest as
+  `std/hash`, held to it by a test in twill over every message length from 0
+  to 70 bytes, at machine speed: 16 MB in 6.5 ms on one machine, where
+  `std/hash` took 0.69 s for 65536 bytes. `docs/needs.md` entry 7 asked for
+  exactly this, and `verify` was unusable above a few megabytes without it.
+  `src/digest.tw` keeps its two exports; the pin, the README's install line
+  and CI move to 1.12.0.
 - **`versions` sorts with the builtin.** twill 1.9.0's `sort` takes a
   comparison, which is what `docs/needs.md` entry 13 asked for, so the
   hand-written insertion sort in `src/registry.tw` is gone. A version has no

@@ -23,34 +23,22 @@ mode systems
 # reference spool's file across a repository boundary that the import rule
 # cannot express.
 #
-# ---- the cost, stated ------------------------------------------------------
+# ---- the cost, settled -----------------------------------------------------
 #
-# This runs the compression function in a tree-walking interpreter, one 32-bit
-# word at a time, on a value type that is 64 bits wide. It will be slow, on the
-# order of a megabyte per second. Hashing a 12 kB parameter tree is nothing;
-# hashing a 400 MB archive at that rate is several minutes and is not
-# acceptable, which is why `docs/needs.md` entry 7 asks for a builtin rather
-# than for `std/hash` alone. selvedge hashes the payload once on write and once
-# on an explicit verify, never on an ordinary load, precisely because of this.
-#
-# Every intermediate is masked back to 32 bits after every step, because I64
-# wraps at 64 bits and SHA-256 wraps at 32.
+# The digest is the `sha256` builtin, which twill 1.11 added and holds to
+# `std/hash` by a test over every message length from 0 to 70 bytes. This
+# module keeps its name and its two exports so that every call site is
+# unchanged, and keeps the argument above for why the digest has to be a real
+# one; what it no longer keeps is a SHA-256 run one 32-bit word at a time in a
+# tree-walking interpreter. That one did about 100 kilobytes a second on this
+# machine; the builtin does 16 MB in 6.5 ms. selvedge still hashes the payload
+# once on write and once on an explicit verify, never on an ordinary load,
+# because that is the right shape and not because hashing is dear any more.
 
-# The compression function itself now lives in twill's standard library, as
-# `std/hash`. This module keeps its name and its two exports so that every call
-# site is unchanged, and keeps the argument above for why the digest has to be a
-# real one; what it no longer keeps is a second hand-written SHA-256. Two copies
-# of this algorithm in one ecosystem is one copy too many -- selvedge's
-# docs/needs.md asked for exactly this ("std/hash, and a SHA-256 that is not
-# interpreted"), and the copy that was here disagreed with the reference on
-# every input, because `not(x)` is the boolean negation and the algorithm wants
-# the bitwise one.
-
-import "std/hash" as sha
 import "bytes_compat.tw" as b
 
 # The lowercase hex SHA-256 of a string's bytes.
-fn hash(msg: Str) -> Str = sha.hash_str(msg)
+fn hash(msg: Str) -> Str = sha256(msg)
 
 # The first `n` hex characters of a digest, for display. Never for comparison:
 # a registry that matched on a prefix would be a registry with a collision
