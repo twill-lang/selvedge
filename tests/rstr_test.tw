@@ -7,7 +7,7 @@ mode systems
 # selvedge's writer, so the two agreeing is evidence rather than a tautology.
 # Every other test here is downstream of it.
 
-import "harness.tw" as t
+import "std/test" as t
 import "../src/rstr.tw" as rstr
 import "../src/bytes_compat.tw" as b
 

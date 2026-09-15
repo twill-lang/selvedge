@@ -217,6 +217,13 @@ are infix or calls
 is an arithmetic shift, which is what `src/rstr.tw` and `src/digest.tw` already
 assume. selvedge writes calls and does not need editing.
 
+The logical shift is a builtin too, since twill 1.11: `ushr(x, k)` reads the
+bit pattern as unsigned and fills with zeros, and the count is masked to 0..63
+so `ushr(x, 0)` is `x`. The hand-written copy in `src/rstr.tw`, four operations
+and a sign test, is gone, and `put_i64` calls the builtin. `tests/rstr_test.tw`
+still writes a negative integer and reads the bytes back, so the case the copy
+existed for is still asserted.
+
 The bikeshed below is not settled and is now cosmetic: the infix spelling still
 appears in spool. What follows is kept as the record of why the split mattered.
 
@@ -308,12 +315,29 @@ comes first should stay the order they were registered in.
 ### 14. A test runner
 
 **Would improve:** `tests/`
-**Status:** DELIVERED. `twill test tests` collects `*_test.tw`, runs each in a
-fresh interpreter and reports once. CI calls it and so does the README.
+**Status:** DELIVERED, both halves. `twill test tests` collects `*_test.tw`,
+runs each in a fresh interpreter and reports once. CI calls it and so does the
+README.
 
-`tests/harness.tw` did not go away and the three copies are still three. The
-runner says which file passed; the harness names the assertion inside it, which
-is a different job. What would delete the three copies is a `std/test`.
+The other half arrived in twill 1.11 as `std/test`, and selvedge's copy of the
+assertions is gone: every suite imports `std/test` as `t` and calls the same
+`check`, `equal_str`, `equal_i64`, `near` and `report` it always did, with the
+same names. What `tests/harness.tw` keeps is the one thing a toolchain cannot
+supply, the scratch directory (`tmp`, `cleanup`) the two file-writing suites
+share; those import it as `h` and call `h.cleanup()` before `t.report(...)`.
+
+The summary line changed shape with the move, and that is the visible gain.
+The hand-written `report` printed `archive: 33 passed, 0 failed`, which the
+runner could not read because it looks for the word `passed` followed by a
+number, so `twill test` reported each file with no counts beside it. `std/test`
+prints `archive passed 33 failed 0` and then `OK` or `FAILED`, and the runner
+now shows `(33 passed, 0 failed)` next to every file. The `exit(1)` the copy
+needed is gone with it; `report` returns the status instead.
+
+*What the entry said before:* `tests/harness.tw` did not go away and the three
+copies are still three. The runner says which file passed; the harness names
+the assertion inside it, which is a different job. What would delete the three
+copies is a `std/test`.
 
 ### 15. Temporary files, and cleaning up after a test
 

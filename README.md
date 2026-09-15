@@ -42,12 +42,12 @@ The suite, from the repository root:
 
 ```
 $ twill test tests
-ok    tests/archive_test.tw
-ok    tests/digest_test.tw
-ok    tests/lineage_test.tw
-ok    tests/registry_test.tw
-ok    tests/rstr_test.tw
-ok    tests/version_test.tw
+ok    tests/archive_test.tw  (33 passed, 0 failed)
+ok    tests/digest_test.tw  (8 passed, 0 failed)
+ok    tests/lineage_test.tw  (20 passed, 0 failed)
+ok    tests/registry_test.tw  (31 passed, 0 failed)
+ok    tests/rstr_test.tw  (24 passed, 0 failed)
+ok    tests/version_test.tw  (30 passed, 0 failed)
 
 6 file(s): 6 passed, 0 failed
 ```

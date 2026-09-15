@@ -12,7 +12,7 @@ mode systems
 # The multi-block case is not decoration. A compression function with a wrong
 # message schedule is often correct for one block and wrong for two.
 
-import "harness.tw" as t
+import "std/test" as t
 import "../src/digest.tw" as dg
 
 fn the_empty_string_hashes_to_the_published_value() {
