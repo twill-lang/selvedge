@@ -4,6 +4,19 @@
 
 ### Changed
 
+- **The assertions are `std/test`.** twill 1.11 ships the assertions the test
+  runner already assumed, and `docs/needs.md` entry 14 said a `std/test` was
+  what would delete selvedge's copy of them. It has: every suite imports
+  `std/test` as `t`, with the same five names it called before, and
+  `tests/harness.tw` keeps only the scratch directory (`tmp`, `cleanup`) that
+  the two file-writing suites share. `report` returns the status rather than
+  calling `exit`, and it prints the summary in the shape `twill test` reads, so
+  the runner now shows the counts beside every file: 146 assertions across six
+  suites, where before it showed none.
+- **The logical shift is the builtin.** twill 1.11's `ushr` is the shift
+  `src/rstr.tw` built by hand out of four operations and a sign test, so
+  `put_i64` calls it and the copy is gone. `docs/needs.md` entry 8 records the
+  reason it existed.
 - **The digest is the builtin.** twill 1.11's `sha256` is the same digest as
   `std/hash`, held to it by a test in twill over every message length from 0
   to 70 bytes, at machine speed: 16 MB in 6.5 ms on one machine, where

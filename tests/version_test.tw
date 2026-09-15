@@ -1,6 +1,6 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
 import "../src/version.tw" as ver
 
 fn a_plain_version_parses() {

@@ -1,6 +1,7 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
+import "harness.tw" as h
 import "../src/registry.tw" as reg
 import "../src/manifest.tw" as mf
 import "../src/version.tw" as ver
@@ -13,7 +14,7 @@ fn a_model(name: Str, v: Str, digest: Str) -> mf.Manifest {
 }
 
 fn stocked() -> reg.Registry {
-  let r = reg.empty(t.tmp("index.json"))
+  let r = reg.empty(h.tmp("index.json"))
   reg.register(r, a_model("blobs", "1.0.0", "aaaa"), "models/blobs-1.0.0.slv", "")
   reg.register(r, a_model("blobs", "1.2.0", "bbbb"), "models/blobs-1.2.0.slv", "production")
   reg.register(r, a_model("blobs", "1.10.0", "cccc"), "models/blobs-1.10.0.slv", "")
@@ -22,7 +23,7 @@ fn stocked() -> reg.Registry {
 }
 
 fn registering_needs_a_digest() {
-  let r = reg.empty(t.tmp("index.json"))
+  let r = reg.empty(h.tmp("index.json"))
   let m = a_model("blobs", "1.0.0", "")
   t.check("an undigested model is refused",
     len(reg.register(r, m, "models/blobs.slv", "")) > 0)
@@ -122,7 +123,7 @@ fn a_stage_resolves_only_when_exactly_one_entry_carries_it() {
 }
 
 fn lineage_walks_back_through_the_registry() {
-  let r = reg.empty(t.tmp("index.json"))
+  let r = reg.empty(h.tmp("index.json"))
   let base = a_model("blobs", "1.0.0", "aaaa")
   reg.register(r, base, "models/blobs-1.0.0.slv", "")
 
@@ -147,7 +148,7 @@ fn lineage_walks_back_through_the_registry() {
 
 fn a_lineage_cycle_terminates_rather_than_hanging() {
   # Lineage is caller-supplied strings, so a cycle is reachable by typing.
-  let r = reg.empty(t.tmp("index.json"))
+  let r = reg.empty(h.tmp("index.json"))
   let a = a_model("blobs", "1.0.0", "aaaa")
   lin.set_parent(a.prov, "blobs", "1.1.0", "bbbb")
   reg.register(r, a, "a.slv", "")
@@ -159,7 +160,7 @@ fn a_lineage_cycle_terminates_rather_than_hanging() {
 }
 
 fn a_parent_digest_that_disagrees_with_the_parent_is_reported() {
-  let r = reg.empty(t.tmp("index.json"))
+  let r = reg.empty(h.tmp("index.json"))
   reg.register(r, a_model("blobs", "1.0.0", "aaaa"), "a.slv", "")
   let child = a_model("blobs", "1.1.0", "bbbb")
   lin.set_parent(child.prov, "blobs", "1.0.0", "not-the-parents-digest")
@@ -170,7 +171,7 @@ fn a_parent_digest_that_disagrees_with_the_parent_is_reported() {
 fn an_index_round_trips_through_json() {
   let r = stocked()
   t.equal_str("the index writes", reg.save_index(r), "")
-  let back: reg.Registry = match reg.load_index(t.tmp("index.json")) {
+  let back: reg.Registry = match reg.load_index(h.tmp("index.json")) {
     Ok(loaded) => loaded,
     Err(msg) => abort("the index did not read back: " + msg),
   }
@@ -183,7 +184,7 @@ fn an_index_round_trips_through_json() {
 fn a_missing_index_is_an_empty_registry_and_not_an_error() {
   # Absence is `Ok` of an empty registry and not `Err`: a registry nobody has
   # written yet is the ordinary first-run state, not a failure.
-  match reg.load_index(t.tmp("index_that_does_not_exist.json")) {
+  match reg.load_index(h.tmp("index_that_does_not_exist.json")) {
     Ok(r) => t.equal_i64("no entries", len(r.entries), 0),
     Err(msg) => t.equal_str("no error", msg, ""),
   }
@@ -204,4 +205,5 @@ a_lineage_cycle_terminates_rather_than_hanging()
 a_parent_digest_that_disagrees_with_the_parent_is_reported()
 an_index_round_trips_through_json()
 a_missing_index_is_an_empty_registry_and_not_an_error()
+h.cleanup()
 t.report("registry")

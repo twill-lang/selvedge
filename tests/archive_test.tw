@@ -1,6 +1,7 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
+import "harness.tw" as h
 import "../src/archive.tw" as arc
 import "../src/manifest.tw" as mf
 import "../src/version.tw" as ver
@@ -57,8 +58,8 @@ fn read_or_abort(path: Str) -> arc.Archive {
 
 fn an_archive_writes_and_reads_back_with_its_metadata_intact() {
   let a = arc.promote(params(), a_manifest())
-  t.equal_str("the write succeeds", arc.write(a, t.tmp("archive.slv")), "")
-  let got = read_or_abort(t.tmp("archive.slv"))
+  t.equal_str("the write succeeds", arc.write(a, h.tmp("archive.slv")), "")
+  let got = read_or_abort(h.tmp("archive.slv"))
   t.equal_str("the name survives", got.man.name, "blobs")
   t.equal_str("the version survives", ver.to_str(got.man.version), "1.0.0")
   t.equal_str("the architecture survives", got.man.architecture, "mlp")
@@ -72,16 +73,16 @@ fn a_free_dimension_survives_the_json_round_trip_as_a_free_dimension() {
   # A batch axis rendered as null in the card has to come back as -1 and not as
   # 0. A shape with a 0 in it checks against nothing, silently.
   let a = arc.promote(params(), a_manifest())
-  arc.write(a, t.tmp("archive.slv"))
-  let got = read_or_abort(t.tmp("archive.slv"))
+  arc.write(a, h.tmp("archive.slv"))
+  let got = read_or_abort(h.tmp("archive.slv"))
   t.equal_i64("the batch axis is still free", got.man.sig.input[0], -1)
   t.equal_i64("and the feature axis is still four", got.man.sig.input[1], 4)
 }
 
 fn the_lineage_survives_and_is_still_reproducible() {
   let a = arc.promote(params(), a_manifest())
-  arc.write(a, t.tmp("archive.slv"))
-  let got = read_or_abort(t.tmp("archive.slv"))
+  arc.write(a, h.tmp("archive.slv"))
+  let got = read_or_abort(h.tmp("archive.slv"))
   t.equal_str("the commit survives", got.man.prov.code_commit,
     "1c9a4f0b7e2d5a6c8b3f1e0d9c8b7a6f5e4d3c2b")
   t.equal_str("the seed survives", lin.hyper(got.man.prov, "seed"), "20260807")
@@ -91,8 +92,8 @@ fn the_lineage_survives_and_is_still_reproducible() {
 
 fn a_written_archive_declares_a_digest_and_verifies() {
   let a = arc.promote(params(), a_manifest())
-  arc.write(a, t.tmp("archive.slv"))
-  let integ = arc.verify(t.tmp("archive.slv"))
+  arc.write(a, h.tmp("archive.slv"))
+  let integ = arc.verify(h.tmp("archive.slv"))
   t.check("it is intact", arc.is_intact(integ))
   t.equal_i64("the digest is a full sha256", len(integ.declared), 64)
   t.equal_str("declared and computed agree", integ.declared, integ.computed)
@@ -103,8 +104,8 @@ fn an_archive_written_without_a_digest_is_unverifiable_and_not_intact() {
   # check, so fine". It is not fine and it is not a mismatch either; it is a
   # third state with its own name.
   let a = arc.promote(params(), a_manifest())
-  arc.write_unhashed(a, t.tmp("unhashed.slv"))
-  let integ = arc.verify(t.tmp("unhashed.slv"))
+  arc.write_unhashed(a, h.tmp("unhashed.slv"))
+  let integ = arc.verify(h.tmp("unhashed.slv"))
   t.check("it is not intact", not arc.is_intact(integ))
   t.check("and the reason is that there is no digest to check",
     integ.status == arc.Absent)
@@ -112,15 +113,15 @@ fn an_archive_written_without_a_digest_is_unverifiable_and_not_intact() {
 
 fn a_tampered_payload_is_caught() {
   let a = arc.promote(params(), a_manifest())
-  arc.write(a, t.tmp("archive.slv"))
-  let good = arc.verify(t.tmp("archive.slv"))
+  arc.write(a, h.tmp("archive.slv"))
+  let good = arc.verify(h.tmp("archive.slv"))
 
   let b2 = arc.promote({ w1: [[0.1, 0.2, 0.3, 0.9]], b1: [0.0],
                          w2: [[0.5]], b2: [0.0] }, a_manifest())
-  arc.write_unhashed(b2, t.tmp("tampered.slv"))
-  let tampered = arc.verify(t.tmp("tampered.slv"))
+  arc.write_unhashed(b2, h.tmp("tampered.slv"))
+  let tampered = arc.verify(h.tmp("tampered.slv"))
   t.check("different weights hash differently",
-    params_digest(t.tmp("archive.slv")) != params_digest(t.tmp("tampered.slv")))
+    params_digest(h.tmp("archive.slv")) != params_digest(h.tmp("tampered.slv")))
   t.check("the good file is intact", arc.is_intact(good))
 }
 
@@ -138,8 +139,8 @@ fn an_archive_from_a_newer_format_is_refused_with_both_numbers() {
   rstr.put_str(out, "")
   let raw = b.to_str(out)
   t.equal_i64("the format field reads as nine", rstr.read_field_i64(raw, "format"), 9)
-  write_text_or(t.tmp("future.slv"), raw)
-  let msg: Str = match arc.read(t.tmp("future.slv")) {
+  write_text_or(h.tmp("future.slv"), raw)
+  let msg: Str = match arc.read(h.tmp("future.slv")) {
     Err(e) => e,
     Ok(_) => "",
   }
@@ -152,8 +153,8 @@ fn a_twill_save_file_that_is_not_an_archive_is_told_apart() {
   # A loom checkpoint is exactly this: a valid twill save file with none of
   # selvedge's fields. Loading it as an archive has to fail here rather than
   # deep inside a field access.
-  save({ epoch: 10.0, params: params() }, t.tmp("checkpoint.bin"))
-  let msg: Str = match arc.read(t.tmp("checkpoint.bin")) {
+  save({ epoch: 10.0, params: params() }, h.tmp("checkpoint.bin"))
+  let msg: Str = match arc.read(h.tmp("checkpoint.bin")) {
     Err(e) => e,
     Ok(_) => "",
   }
@@ -165,7 +166,7 @@ fn a_twill_save_file_that_is_not_an_archive_is_told_apart() {
 fn an_archive_with_no_name_is_refused_before_it_is_written() {
   let m = mf.manifest("", ver.parse("1.0.0"), "mlp", mf.signature([], [], ""))
   let a = arc.promote(params(), m)
-  t.check("a nameless archive is refused", len(arc.write_unhashed(a, t.tmp("bad.slv"))) > 0)
+  t.check("a nameless archive is refused", len(arc.write_unhashed(a, h.tmp("bad.slv"))) > 0)
 }
 
 fn the_signature_digest_changes_only_with_the_contract() {
@@ -205,4 +206,5 @@ a_twill_save_file_that_is_not_an_archive_is_told_apart()
 an_archive_with_no_name_is_refused_before_it_is_written()
 the_signature_digest_changes_only_with_the_contract()
 the_metadata_is_json_a_stranger_can_read()
+h.cleanup()
 t.report("archive")

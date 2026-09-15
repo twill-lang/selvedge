@@ -1,6 +1,6 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
 import "../src/lineage.tw" as lin
 
 fn full() -> lin.Lineage {

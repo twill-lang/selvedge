@@ -576,16 +576,3 @@ fn put_list(out: Bytes, count: I64) {
   put_i32(out, count)
 }
 
-# Logical right shift. `shr` is arithmetic on I64, so shifting a negative value
-# down smears sign bits into the byte being extracted and every put_i64 of a
-# negative number would write 0xff bytes. twill's own `src/float.tw` carries the
-# same helper for the same reason; see docs/needs.md entry 8.
-fn ushr(x: I64, k: I64) -> I64 {
-  if k == 0 {
-    return x
-  }
-  if x >= 0 {
-    return shr(x, k)
-  }
-  or(shr(and(x, bnot(shl(1, 63))), k), shl(1, 63 - k))
-}
