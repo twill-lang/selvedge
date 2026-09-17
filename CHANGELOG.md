@@ -4,6 +4,9 @@
 
 ### Changed
 
+- **The pin is twill 1.13.0.** `spool.toml`, the CI workflow and the README's
+  install line move from 1.12.0 to 1.13.0. This is a pin-currency bump, not a
+  behaviour change: the six suites pass on 1.13.0 with the same 146 assertions.
 - **The assertions are `std/test`.** twill 1.11 ships the assertions the test
   runner already assumed, and `docs/needs.md` entry 14 said a `std/test` was
   what would delete selvedge's copy of them. It has: every suite imports
