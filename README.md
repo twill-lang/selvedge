@@ -28,7 +28,8 @@ the 6 test suites under `tests/` pass, the example publishes and resolves a
 model, and CI runs both against a released twill on every push rather than
 gating on the prose in this file.
 
-You need twill 1.19.0 or newer. Get one:
+You need twill 1.11.0 or newer. CI tests against 1.19.0, which is what
+`spool.toml` pins. Get one:
 
 ```bash
 curl -fsSL -o twill https://github.com/twill-lang/twill/releases/download/v1.19.0/twill-v1.19.0-linux-amd64
